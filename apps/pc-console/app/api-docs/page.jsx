@@ -33,7 +33,7 @@ export default async function ApiDocsPage() {
         </Link>
         <nav>
           <Link href="/developer">开发者中心</Link>
-          <a href="/developer/backend/openapi/isv.json?download=1">下载规范</a>
+          <a href="/backend/openapi/isv.json?download=1">下载规范</a>
         </nav>
       </header>
       <ApiDocs initialSpec={spec} initialMd={md} />

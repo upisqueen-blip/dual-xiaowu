@@ -31,10 +31,11 @@ start "PC Console 8101" /min /D "%ROOT%\apps\pc-console" cmd /k "set XIAOWU_API_
 echo.
 echo  All services started. Three minimized windows are on the taskbar.
 echo    Backend API:        http://localhost:8104
-echo    Content console:    http://localhost:8094
+echo    Content console:    http://localhost:8094  (also http://localhost:8101/admin)
 echo    Platform console:   http://localhost:8101
-echo      Developer center: http://localhost:8101/developer
-echo      Content config:   http://localhost:8101/content-config
+echo      Creator portal:   http://localhost:8101/
+echo      Ops overview:     http://localhost:8101/center
+echo      Content console:  http://localhost:8101/admin
 echo.
 echo  Tip: open 8094 or 8101 in your browser after a few seconds.
 echo  To stop: close the corresponding command windows.

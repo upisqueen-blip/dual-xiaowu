@@ -148,7 +148,7 @@ export default function PairPage() {
       <div className="pair-page">
         <div className="pair-box">
           <div className="pair-brand">
-            <img src="/logo.png" alt="" />
+            <img src="/admin/logo.png" alt="" />
             <div>
               <b>森穹小悟</b>
               <span>DEVICE AUTHORIZATION</span>
@@ -170,7 +170,7 @@ export default function PairPage() {
     <div className="pair-page">
       <div className="pair-wrap">
         <div className="pair-brand">
-          <img src="/logo.png" alt="" />
+          <img src="/admin/logo.png" alt="" />
           <div>
             <b>森穹小悟</b>
             <span>DEVICE AUTHORIZATION</span>

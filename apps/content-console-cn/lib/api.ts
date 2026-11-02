@@ -1,5 +1,13 @@
 export const TOKEN_KEY = "ink_token";
 
+// 应用对外挂在 /admin 子路径下（与 next.config 的 basePath 一致）。
+// 浏览器端以 "/" 开头的接口/资源路径需要手动补上该前缀，否则会打到站点根路径（门户）。
+export const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? "/admin";
+
+export function withBasePath(path: string) {
+  return path.startsWith("/") && !path.startsWith("//") ? `${BASE_PATH}${path}` : path;
+}
+
 export function getToken() {
   return typeof window === "undefined" ? null : localStorage.getItem(TOKEN_KEY);
 }
@@ -18,7 +26,7 @@ export function authHeaders(extra: Record<string, string> = {}) {
 }
 
 export async function api<T = Record<string, unknown>>(path: string, init: RequestInit = {}): Promise<T> {
-  const response = await fetch(path, {
+  const response = await fetch(withBasePath(path), {
     ...init,
     headers: authHeaders(init.headers as Record<string, string> | undefined),
   });

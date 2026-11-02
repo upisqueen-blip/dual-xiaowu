@@ -1,8 +1,8 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
 
-// 后端根：pc-console 把 /developer/backend/* 反向代理到 8104。
-const API_BASE = "/developer/backend";
+// 后端根：pc-console 把 /backend/* 反向代理到 8104。
+const API_BASE = "/backend";
 
 const METHOD_TONE = { get: "m-get", post: "m-post", delete: "m-del" };
 
