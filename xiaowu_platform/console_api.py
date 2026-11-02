@@ -49,6 +49,15 @@ def current_user(
     return user_id
 
 
+def can_manage_device(user_id: str, mac: str) -> bool:
+    """设备所有者本人，或平台管理员，都可管理该设备。
+
+    管理员账号（admin_accounts）不参与 device_bindings，如果只按「是否绑定」
+    校验，管理员登录后既看不到设备、也存不了配置。这里统一放开。
+    """
+    return store.user_owns(user_id, mac) or store.is_platform_admin(user_id)
+
+
 def optional_user(
     x_user_token: Annotated[str | None, Header()] = None,
     authorization: Annotated[str | None, Header()] = None,
@@ -204,20 +213,27 @@ def reset_do(body: dict[str, Any]) -> dict[str, Any]:
 # ——— 设备 ———
 @router.get("/api/user/devices")
 def user_devices(user_id: str = Depends(current_user)) -> dict[str, Any]:
-    rows = store.user_devices(user_id)
+    """设备列表。
+
+    - 普通用户：只返回自己绑定/被共享的设备；
+    - 平台管理员：返回全平台设备（带归属账号，未绑定设备也能看到，便于运维排查）。
+    """
+    is_admin = store.is_platform_admin(user_id)
+    rows = store.all_devices_with_owner() if is_admin else store.user_devices(user_id)
     devices = [
         {
             "mac": r["device_id"],
-            "nickname": r["nickname"],
-            "role": "owner",
+            "nickname": r.get("nickname") or "",
+            "role": "admin" if is_admin else "owner",
             "status": "online" if online(r["last_seen_at"]) else "offline",
             "is_online": online(r["last_seen_at"]),
             "last_seen": r["last_seen_at"] or "暂无记录",
             "model": r.get("model"),
+            "owner": r.get("owner_username"),
         }
         for r in rows
     ]
-    return {"devices": devices}
+    return {"devices": devices, "scope": "all" if is_admin else "mine"}
 
 
 class BindIn(BaseModel):
@@ -299,7 +315,7 @@ def get_dual_config(
     # 固件 LoadDualConfig 用 X-Device-Token；Web/小程序用用户归属
     if x_device_token and store.verify_device_token(mac, x_device_token):
         pass
-    elif user_id and store.user_owns(user_id, mac):
+    elif user_id and can_manage_device(user_id, mac):
         pass
     else:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "无权访问该设备配置")
@@ -319,7 +335,7 @@ def post_dual_config(mac: str, body: dict[str, Any], user_id: str = Depends(curr
     inner = body.get("payload")
     payload = inner if isinstance(inner, dict) else body
     payload.pop("payload", None)
-    if not store.user_owns(user_id, mac):
+    if not can_manage_device(user_id, mac):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "设备未绑定到当前账号")
     # 理财自选股保护：整包覆盖时若 payload 未携带 financeWatchlist，保留服务端已有值
     existing = store.get_content_config(mac)
@@ -749,7 +765,7 @@ class FinanceApplyIn(BaseModel):
 def finance_watchlist_apply(body: FinanceApplyIn, user_id: str = Depends(current_user)) -> dict[str, Any]:
     """把当前账号的自选股写入设备 dual_config（content.financeWatchlist），设备下次唤醒生效。"""
     mac = body.mac.strip().upper()
-    if not store.user_owns(user_id, mac):
+    if not can_manage_device(user_id, mac):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "设备未绑定到当前账号")
     watchlist = _user_watchlist(user_id)
     if not watchlist:
@@ -846,7 +862,7 @@ def finance_portfolio_save(body: PortfolioIn, user_id: str = Depends(current_use
 def finance_portfolio_apply(body: FinanceApplyIn, user_id: str = Depends(current_user)) -> dict[str, Any]:
     """把资金管理视图写入设备 dual_config（content.financePortfolio），下次唤醒生效。"""
     mac = body.mac.strip().upper()
-    if not store.user_owns(user_id, mac):
+    if not can_manage_device(user_id, mac):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "设备未绑定到当前账号")
     profile = store.get_user_profile(user_id, "finance") or {}
     portfolio = {"cash": profile.get("cash") or 0, "positions": profile.get("portfolio") or []}
@@ -874,7 +890,7 @@ class TeacherGenIn(BaseModel):
 @router.post("/api/teacher-auth/generate")
 def teacher_generate(body: TeacherGenIn, user_id: str = Depends(current_user)) -> dict[str, Any]:
     mac = body.device_mac.strip().upper()
-    if not store.user_owns(user_id, mac):
+    if not can_manage_device(user_id, mac):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "设备未绑定到当前账号")
     row = store.create_teacher_code(mac, body.auth_name or "老师", body.permission, user_id, body.validity_days)
     return {"auth_code": row["auth_code"], "expire_time": row["expire_time"], "qr_text": f"XIAOWU-TEACHER:{row['auth_code']}"}
@@ -883,7 +899,7 @@ def teacher_generate(body: TeacherGenIn, user_id: str = Depends(current_user)) -
 @router.get("/api/teacher-auth/list")
 def teacher_list(mac: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
     mac = mac.strip().upper()
-    if not store.user_owns(user_id, mac):
+    if not can_manage_device(user_id, mac):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "设备未绑定到当前账号")
     return {"items": store.list_teacher_codes(mac)}
 
@@ -897,7 +913,7 @@ class TeacherFreezeIn(BaseModel):
 @router.post("/api/teacher-auth/freeze")
 def teacher_freeze(body: TeacherFreezeIn, user_id: str = Depends(current_user)) -> dict[str, Any]:
     mac = body.device_mac.strip().upper()
-    if not store.user_owns(user_id, mac):
+    if not can_manage_device(user_id, mac):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "设备未绑定到当前账号")
     store.freeze_teacher_code(mac, body.auth_code.strip().upper(), body.frozen == 1)
     return {"ok": True}
@@ -989,7 +1005,7 @@ def _message_access(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "缺少设备标识")
     if x_device_token and store.verify_device_token(mac, x_device_token):
         return mac, "device"
-    if user_id and store.user_owns(user_id, mac):
+    if user_id and can_manage_device(user_id, mac):
         return mac, "user"
     raise HTTPException(status.HTTP_403_FORBIDDEN, "无权访问该设备留言")
 
@@ -1105,7 +1121,7 @@ def message_audio(
     if not uid and token:
         uid = store.session_user(token)
     ok = False
-    if uid and store.user_owns(uid, item["device_id"]):
+    if uid and can_manage_device(uid, item["device_id"]):
         ok = True
     if not ok and x_device_token and store.verify_device_token(item["device_id"], x_device_token):
         ok = True
@@ -1471,7 +1487,7 @@ def push_history(device_mac: str = "", auth_code: str = "", user_id: str | None 
     if auth_code:
         if not _verify_teacher(mac, auth_code):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "授权码无效或已失效")
-    elif user_id and store.user_owns(user_id, mac):
+    elif user_id and can_manage_device(user_id, mac):
         pass
     else:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "无权查看该设备推送历史")
@@ -1482,7 +1498,7 @@ def push_history(device_mac: str = "", auth_code: str = "", user_id: str | None 
 @router.delete("/api/push/history/{push_id}")
 def delete_push(device_mac: str, push_id: int, user_id: str = Depends(current_user)) -> dict[str, Any]:
     mac = device_mac.strip().upper()
-    if not store.user_owns(user_id, mac):
+    if not can_manage_device(user_id, mac):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "无权操作该设备")
     ok = store.delete_push(mac, push_id)
     return {"ok": ok}
@@ -1493,7 +1509,7 @@ def delete_push(device_mac: str, push_id: int, user_id: str = Depends(current_us
 def sync_device(mac: str, user_id: str | None = Depends(optional_user),
                 x_device_token: Annotated[str | None, Header()] = None) -> dict[str, Any]:
     mac = mac.strip().upper()
-    if not (x_device_token and store.verify_device_token(mac, x_device_token)) and not (user_id and store.user_owns(user_id, mac)):
+    if not (x_device_token and store.verify_device_token(mac, x_device_token)) and not (user_id and can_manage_device(user_id, mac)):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "无权同步该设备")
     now = time.time()
     last = _sync_last.get(mac, 0)
@@ -1511,7 +1527,7 @@ def device_snapshot(mac: str = Query(...), screen: str = Query(default="a"),
                    user_id: str | None = Depends(optional_user),
                    x_device_token: Annotated[str | None, Header()] = None) -> dict[str, Any]:
     mac = mac.strip().upper()
-    if not (x_device_token and store.verify_device_token(mac, x_device_token)) and not (user_id and store.user_owns(user_id, mac)):
+    if not (x_device_token and store.verify_device_token(mac, x_device_token)) and not (user_id and can_manage_device(user_id, mac)):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "无权查看该设备")
     cfg = store.get_content_config(mac) or {}
     screen_spec = cfg.get("screen") or {}

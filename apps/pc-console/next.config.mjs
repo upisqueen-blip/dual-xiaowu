@@ -9,7 +9,9 @@
 const upstream = (name) => (process.env[name] || "").trim().replace(/\/$/, "");
 
 const backend = upstream("XIAOWU_API_BASE");
-const contentConsole = upstream("XIAOWU_CONTENT_CONSOLE_URL");
+// 约定填「根地址」（不要带 /admin）。但线上很容易顺手填成 http://host:8094/admin，
+// 那样会拼成 /admin/admin/... 直接 404，排查起来极难。这里自动剥掉尾部 /admin。
+const contentConsole = upstream("XIAOWU_CONTENT_CONSOLE_URL").replace(/\/admin$/, "");
 
 // 缺配置时明确报出来，避免「以为配好了，结果 404/502」排查半天。
 const missing = [

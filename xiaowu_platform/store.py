@@ -346,6 +346,32 @@ class Store:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def is_platform_admin(self, user_id: str) -> bool:
+        """是否平台管理员（admin_accounts 里启用中的账号）。
+
+        管理员与普通用户是两套身份：管理员不参与 device_bindings，
+        因此设备列表要单独走「全部设备」视图。
+        """
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT 1 FROM admin_accounts WHERE admin_id=? AND status='active'", (user_id,)
+            ).fetchone()
+        return row is not None
+
+    def all_devices_with_owner(self) -> list[dict[str, Any]]:
+        """管理员视角：全部设备 + 归属账号（未绑定为 None）。"""
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT d.device_id, d.model, d.firmware_version, d.last_seen_at, d.battery_voltage, d.rssi,"
+                " (SELECT b.nickname FROM device_bindings b WHERE b.device_id=d.device_id ORDER BY b.rowid LIMIT 1) AS nickname,"
+                " (SELECT b.user_id  FROM device_bindings b WHERE b.device_id=d.device_id ORDER BY b.rowid LIMIT 1) AS owner_user_id,"
+                " (SELECT u.username FROM device_bindings b JOIN users u ON u.user_id=b.user_id"
+                "   WHERE b.device_id=d.device_id ORDER BY b.rowid LIMIT 1) AS owner_username"
+                " FROM devices d"
+                " ORDER BY d.last_seen_at IS NULL, d.last_seen_at DESC, d.device_id"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def device_members(self, device_id: str) -> list[dict[str, Any]]:
         with self.connect() as db:
             rows = db.execute(

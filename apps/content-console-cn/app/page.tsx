@@ -17,7 +17,7 @@ type ScreenConfig = { title: string; source: string; refresh: string; modules: s
 type DualWeatherPreview = { city: string; today_temp: string; current_temp?: string; today_desc: string; today_code?: number; today_low: string; today_high: string; today_humidity?: string; today_wind_dir?: string; today_wind_level?: string; sunrise?: string; sunset?: string; advice?: string; forecast?: { day: string; date: string; temp_range: string; desc: string; code?: number }[]; feels_like?: string | number | null; city_pinyin?: string; solar_term?: string; solar_term_day?: string; updated_at?: string; lunar_date?: string; lunar_year?: string; lunar_zodiac?: string; plate_limit?: string };
 type Scene = { name: string; eyebrow: string; desc: string; icon: string; a: ScreenConfig; b: ScreenConfig };
 type User = { user_id: number; username: string };
-type Device = { mac: string; nickname?: string; role?: string; status?: string; is_online?: boolean; last_seen?: string };
+type Device = { mac: string; nickname?: string; role?: string; status?: string; is_online?: boolean; last_seen?: string; owner?: string | null };
 
 const presetScenes: Record<string, Scene> = {
   family: {
@@ -350,7 +350,7 @@ function Dashboard({ user, devices, sceneKey, selectedDevice, setNav, openAuth, 
       <div className="welcome-actions">{user ? <><button className="button primary" onClick={() => setNav("scenes")}><Sparkles size={16}/>选择场景</button><button className="button light" onClick={openPair}><Link2 size={16}/>绑定新设备</button></> : <button className="button primary" onClick={openAuth}>登录 小悟AI 账号</button>}</div>
     </section>
     <section className="stats">
-      <Stat icon={<Cpu/>} label="我的设备" value={String(devices.length)} note={devices.length ? "已接入当前账号" : "等待绑定"}/>
+      <Stat icon={<Cpu/>} label={devices.some((d)=>d.role==="admin")?"全部设备":"我的设备"} value={String(devices.length)} note={devices.length ? (devices.some((d)=>d.role==="admin") ? "全平台设备" : "已接入当前账号") : "等待绑定"}/>
       <Stat icon={<Wifi/>} label="当前状态" value={selectedDevice?.is_online ? "在线" : "离线"} note={selectedDevice ? selectedDevice.mac : "尚未选择设备"}/>
       <Stat icon={<Sparkles/>} label="当前场景" value={activeScene.name} note={`${activeScene.a.title} + ${activeScene.b.title}`}/>
       <Stat icon={<Cloud/>} label="配置同步" value={selectedDevice?.is_online ? "可同步" : "待上线"} note="配置草稿安全保留"/>
@@ -1324,8 +1324,10 @@ function ScreenSummary({ kind, config }: { kind: "a"|"b"; config: ScreenConfig }
 function DeviceManager({ devices, user, refresh, openAuth, openPair, notify, choose }: { devices: Device[]; user: User|null; refresh:()=>Promise<void>; openAuth:()=>void; openPair:()=>void; notify:(m:string)=>void; choose:(m:string)=>void }) {
   async function unbind(device: Device) { if (!confirm(`确认解绑 ${device.nickname || device.mac}？`)) return; try { await api(`/api/user/devices/${encodeURIComponent(device.mac)}`, { method: "DELETE" }); await refresh(); notify("设备已解绑"); } catch (e) { notify((e as Error).message); } }
   if (!user) return <EmptyState icon={<ShieldCheck/>} title="登录后管理你的设备" text="这里复用 小悟AI 的账号、设备绑定和所有权体系。" action="登录账号" onAction={openAuth}/>;
-  return <><div className="page-intro row"><div><span className="kicker">DEVICE FLEET</span><h2>设备与绑定</h2><p>绑定关系与原 小悟AI 后台共享，不会创建重复设备。</p></div><button className="button primary" onClick={openPair}><Plus size={16}/>绑定设备</button></div>
-    {devices.length === 0 ? <EmptyState icon={<Cpu/>} title="还没有绑定设备" text="输入设备屏幕上的配对码，或使用设备 MAC 地址绑定。" action="绑定第一台设备" onAction={openPair}/> : <div className="device-table"><div className="table-head"><span>设备</span><span>连接状态</span><span>角色</span><span>最后活动</span><span/></div>{devices.map(d=><div className="device-row" key={d.mac}><div className="device-name"><i><Cpu size={19}/></i><span><b>{d.nickname || "双屏墨水屏"}</b><small>{d.mac}</small></span></div><span className={`status-pill ${d.is_online?"on":""}`}><i/>{d.is_online?"在线":"离线"}</span><span>{d.role === "owner" ? "所有者" : "共享成员"}</span><span>{d.last_seen || "暂无记录"}</span><div className="row-actions"><button onClick={()=>choose(d.mac)}>配置</button><button className="danger" aria-label="解绑" onClick={()=>void unbind(d)}><Trash2 size={15}/></button></div></div>)}</div>}
+  // 平台管理员登录时后端返回全平台设备（role="admin"），页面切到「全平台」视角。
+  const adminView = devices.some((d) => d.role === "admin");
+  return <><div className="page-intro row"><div><span className="kicker">DEVICE FLEET</span><h2>设备与绑定</h2><p>{adminView ? "平台管理员视角：展示全平台设备，可直接配置任意设备的内容。" : "绑定关系与原 小悟AI 后台共享，不会创建重复设备。"}</p></div><button className="button primary" onClick={openPair}><Plus size={16}/>绑定设备</button></div>
+    {devices.length === 0 ? <EmptyState icon={<Cpu/>} title="还没有绑定设备" text="输入设备屏幕上的配对码，或使用设备 MAC 地址绑定。" action="绑定第一台设备" onAction={openPair}/> : <div className="device-table"><div className="table-head"><span>设备</span><span>连接状态</span><span>{adminView ? "归属账号" : "角色"}</span><span>最后活动</span><span/></div>{devices.map(d=><div className="device-row" key={d.mac}><div className="device-name"><i><Cpu size={19}/></i><span><b>{d.nickname || "双屏墨水屏"}</b><small>{d.mac}</small></span></div><span className={`status-pill ${d.is_online?"on":""}`}><i/>{d.is_online?"在线":"离线"}</span><span>{adminView ? (d.owner || "未绑定") : (d.role === "owner" ? "所有者" : "共享成员")}</span><span>{d.last_seen || "暂无记录"}</span><div className="row-actions"><button onClick={()=>choose(d.mac)}>配置</button>{adminView ? null : <button className="danger" aria-label="解绑" onClick={()=>void unbind(d)}><Trash2 size={15}/></button>}</div></div>)}</div>}
   </>;
 }
 
