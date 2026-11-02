@@ -22,11 +22,17 @@ echo.
 echo Step 1 of 3: Starting backend API on port 8104
 start "XiaoWu Backend 8104" /min cmd /k "cd /d %ROOT% && %VENV% -m uvicorn xiaowu_platform.main:app --host 0.0.0.0 --port 8104 --reload"
 
+REM 上游地址统一由各 app 自己的 .env 提供，这里不再 set，
+REM 避免"启动脚本一套、.env 一套"两处配置打架。
+REM 首次运行且没有 .env 时，从 .env.example 复制一份（.env 不进 git）。
+if not exist "%ROOT%\apps\pc-console\.env" copy /Y "%ROOT%\apps\pc-console\.env.example" "%ROOT%\apps\pc-console\.env" >nul
+if not exist "%ROOT%\apps\content-console-cn\.env" copy /Y "%ROOT%\apps\content-console-cn\.env.example" "%ROOT%\apps\content-console-cn\.env" >nul
+
 echo Step 2 of 3: Starting content console on port 8094
-start "Content Console 8094" /min /D "%ROOT%\apps\content-console-cn" cmd /k "set INKSIGHT_BACKEND_API_BASE=%BACKEND_URL%&& npm run dev"
+start "Content Console 8094" /min /D "%ROOT%\apps\content-console-cn" cmd /k "npm run dev"
 
 echo Step 3 of 3: Starting platform console on port 8101
-start "PC Console 8101" /min /D "%ROOT%\apps\pc-console" cmd /k "set XIAOWU_API_BASE=%BACKEND_URL%&& npm run dev"
+start "PC Console 8101" /min /D "%ROOT%\apps\pc-console" cmd /k "npm run dev"
 
 echo.
 echo  All services started. Three minimized windows are on the taskbar.

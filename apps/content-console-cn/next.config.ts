@@ -1,5 +1,24 @@
 import type { NextConfig } from "next";
 
+// Next 16 会在执行本文件之前就读完本目录的 .env（构建日志里的 Environments 行），
+// 所以这里可以直接用 process.env，无需再手动 loadEnvConfig。
+// 加载顺序：.env.local > .env.[NODE_ENV] > .env
+
+// 后端地址只从 .env 读（INKSIGHT_BACKEND_API_BASE），代码里不写死端口。
+// 换后端 / 换机器只改 .env，不用动代码。
+const backend = (process.env.INKSIGHT_BACKEND_API_BASE || "").trim().replace(/\/$/, "");
+
+if (!backend) {
+  console.warn(
+    [
+      "",
+      "[content-console-cn] .env 缺少 INKSIGHT_BACKEND_API_BASE，/api 将不可用。",
+      "  处理：复制 apps/content-console-cn/.env.example 为 apps/content-console-cn/.env 并填写。",
+      "",
+    ].join("\n"),
+  );
+}
+
 const nextConfig: NextConfig = {
   // 对外挂在 dual.xiaowuai.vip/admin 下；basePath 让路由、/_next 资源、Link 统一带 /admin 前缀。
   // 注意：<img src="/..."> 这类原生标签不会被自动加前缀，已在页面内手动写成 /admin/...。
@@ -13,7 +32,7 @@ const nextConfig: NextConfig = {
     cpus: 1,
   },
   async rewrites() {
-    const backend = process.env.INKSIGHT_BACKEND_API_BASE?.replace(/\/$/, "") || "http://127.0.0.1:8104";
+    if (!backend) return [];
     return [{ source: "/api/:path*", destination: `${backend}/api/:path*` }];
   },
   // HTML 每次回源校验，避免构建后旧 HTML 引用已删除的 chunk（表现「布局全乱」）。
