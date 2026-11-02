@@ -40,6 +40,12 @@ const config = {
   // 站点根路径即「创作者门户」：/  -> 门户(截图+登录)
   // /center -> 运营总览（设备、内容任务、审计）
   // /admin  -> 内容配置后台（反代到 .env 里配置的 XIAOWU_CONTENT_CONSOLE_URL）
+  // 前端为客户端组件，跳转「双屏内容配置」时直接用 XIAOWU_CONTENT_CONSOLE_URL 配置的
+  // 根地址本身（如 https://dualcn.xiaowuai.vip），而不是相对路径 /admin。
+  // 通过 env 字段把已 trim、剥除尾部 /admin 的 contentConsole 注入 process.env，构建时内联。
+  env: {
+    NEXT_PUBLIC_CONTENT_CONSOLE_URL: contentConsole,
+  },
   async rewrites() {
     return [
       backend && { source: "/backend/:path*", destination: `${backend}/:path*` },
