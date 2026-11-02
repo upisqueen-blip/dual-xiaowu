@@ -1,9 +1,11 @@
 import os
 from pathlib import Path
 
-# 加载项目根目录的 .env（python-dotenv）。
+# 加载项目根目录的 .env（xiaowu_platform/ 的上一级，即仓库根）。
+# 此前代码从不读取 .env，run_backend.bat 也不注入环境变量，
+# 导致 XIAOWU_ADMIN_USERNAME / XIAOWU_ADMIN_PASSWORD 实际为空、管理员无法登录。
 # override=False（默认）：真实环境变量优先于 .env，便于服务器用 systemd 的
-# Environment= 注入生产配置，.env 只用于填补缺口。本地无环境变量时则读 .env。
+# Environment= 或容器 export 注入生产配置；本地无环境变量时则读 .env 填补缺口。
 try:
     from dotenv import load_dotenv
 
@@ -12,6 +14,7 @@ try:
 except ImportError:
     # 未安装 python-dotenv 时退化为仅读真实环境变量（容器/系统已 export 的场景）
     pass
+
 
 
 class Settings:

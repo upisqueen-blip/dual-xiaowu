@@ -15,3 +15,6 @@ uploads/
 dist/
 build/
 *.egg-info/
+
+# WorkBuddy local agent workspace
+.workbuddy/
