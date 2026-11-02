@@ -43,6 +43,9 @@ const config = {
   async rewrites() {
     return [
       backend && { source: "/backend/:path*", destination: `${backend}/:path*` },
+      // 裸 /admin 单独一条：不能指望 "/admin/:path*" 一定匹配零段
+      // （不同 Next 版本 path-to-regexp 行为不一致，缺了就是「/admin 404、/admin/pair 正常」）
+      contentConsole && { source: "/admin", destination: `${contentConsole}/admin` },
       contentConsole && { source: "/admin/:path*", destination: `${contentConsole}/admin/:path*` },
     ].filter(Boolean);
   },

@@ -50,14 +50,27 @@ else
   echo "!! 没有 .next/routes-manifest.json —— 还没执行 npm run build，或跑的是 next dev"
 fi
 
-hdr "4. 端口监听（8094 内容台 / 8101 门户 / 8104 后端）"
+hdr "4. 端口监听（只列 node 相关，便于对照实际端口）"
 if command -v ss >/dev/null 2>&1; then
-  ss -lntp 2>/dev/null | grep -E ':(8094|8101|8104)\b' || echo "(ss 无匹配)"
+  ss -lntp 2>/dev/null | grep -E ':(8094|8101|8104|3000|3001|8080|8081)\b|node' || echo "(无匹配)"
 elif command -v netstat >/dev/null 2>&1; then
-  netstat -lntp 2>/dev/null | grep -E ':(8094|8101|8104)\b' || echo "(netstat 无匹配)"
+  netstat -lntp 2>/dev/null | grep -E ':(8094|8101|8104|3000|3001|8080|8081)\b|node' || echo "(无匹配)"
 else
   echo "(ss/netstat 都没有)"
 fi
+
+# 端口优先从各自 package.json 的 start/dev 脚本里读，读不到再回落到默认值
+port_of() {
+  local app="$1" fallback="$2" pj="$ROOT/apps/$1/package.json"
+  local p=""
+  if [ -f "$pj" ] && command -v node >/dev/null 2>&1; then
+    p="$(node -e "try{const s=require('$pj').scripts||{};const t=(s.start||'')+' '+(s.dev||'');const m=/-p\s*(\d+)/.exec(t);process.stdout.write(m?m[1]:'')}catch(e){}" 2>/dev/null)"
+  fi
+  [ -n "$p" ] && echo "$p" || echo "$fallback"
+}
+CC_PORT="$(port_of content-console-cn 8094)"
+PC_PORT="$(port_of pc-console 8101)"
+echo "  识别到的端口: content-console-cn=$CC_PORT  pc-console=$PC_PORT"
 
 hdr "5. 逐级探测"
 probe() {
@@ -65,39 +78,49 @@ probe() {
   code="$(curl -s -o /dev/null -w '%{http_code}' -m 6 "$url" 2>/dev/null || echo ERR)"
   printf '  %-44s -> %s\n' "$url" "$code"
 }
-probe "http://127.0.0.1:8094/admin"
-probe "http://127.0.0.1:8094/"
-probe "http://127.0.0.1:8101/admin"
-probe "http://127.0.0.1:8101/"
+probe "http://127.0.0.1:$CC_PORT/admin"
+probe "http://127.0.0.1:$CC_PORT/admin/pair"
+probe "http://127.0.0.1:$CC_PORT/"
+probe "http://127.0.0.1:$PC_PORT/admin"
+probe "http://127.0.0.1:$PC_PORT/admin/pair"
+probe "http://127.0.0.1:$PC_PORT/"
 probe "http://127.0.0.1:8104/health"
 
 if [ $# -ge 1 ]; then
   hdr "6. 线上站点"
   BASE="${1%/}"
   probe "$BASE/admin"
-  probe "$BASE/"
+  probe "$BASE/admin/pair"
   probe "$BASE/center"
+  probe "$BASE/"
   echo "  --- /admin 响应头（看是谁返回的 404）---"
   curl -s -o /dev/null -D - -m 10 "$BASE/admin" 2>/dev/null | head -12
 fi
 
 hdr "判读"
-cat <<'EOF'
-  A) 8094/admin=200 且 8101/admin=200
-     → 两级服务都正常，404 来自更外层：nginx/网关的 location 规则或域名路由。
-       检查 nginx 是否把 /admin 单独 match 到了不存在的 upstream。
+cat <<EOF
+  先看第 6 节的 4 个状态码，按下面顺序对号：
 
-  B) 8094/=200 但 8094/admin=404
-     → 上游产物没带 basePath。改过 next.config.ts 之后必须重新 npm run build，
-       只重启进程不会生效。见第 3 节。
+  1) 域名/admin=404  但  域名/admin/pair=200
+     → 反代本身是通的，只是「裸 /admin」这条没匹配上 rewrite
+       （/admin/:path* 在部分 Next 版本不匹配零段）。
+       新版 next.config.mjs 已显式补了 source: "/admin" 这一条 → 重新 build pc-console 即可。
 
-  C) 8094/admin=200 但 8101/admin=404
-     → pc-console 的 /admin rewrite 没注册或目标写错。见第 1 节，
-       常见是把 XIAOWU_CONTENT_CONSOLE_URL 填成了 http://host:8094/admin（多带 /admin）。
+  2) 域名/admin 与 域名/admin/pair 都 404，但 127.0.0.1:$PC_PORT/admin=200
+     → 请求被外层拦掉了（nginx / 负载均衡 / CDN）。
+       查 location /admin 是否指向了不存在的 upstream。
 
-  D) 8094 完全连不上（000/ERR）
-     → 内容台没起，或端口不是 8094。确认 package.json 的 -p 与 .env 里填的端口一致。
+  3) 127.0.0.1:$PC_PORT/admin 也是 404
+     → pc-console 的 rewrite 没注册。第 1 节里 XIAOWU_CONTENT_CONSOLE_URL 缺失，
+       或填成 http://host:$CC_PORT/admin（多带 /admin，新版会自动剥，但要重新 build）。
+       另看 pc-console 启动日志有没有「[pc-console] .env 缺少以下配置」。
 
-  E) 线上 /admin 有响应但不是 200，响应头里 server 是 nginx
-     → 请求根本没到 pc-console，直接查 nginx 配置。
+  4) 127.0.0.1:$CC_PORT/admin=404 而 127.0.0.1:$CC_PORT/=200
+     → 上游产物没带 basePath，重新 build 上游。
+
+  5) 127.0.0.1:$CC_PORT 完全连不上（000/ERR）
+     → 内容台没起，或端口与 .env 里填的不一致（第 4 节对照实际监听端口）。
+
+  附：/admin/pair 是上游的另一个真实路由，专门用来看「反代通不通」与
+      「上游 basePath 有没有生效」，别跳过这一条。
 EOF
