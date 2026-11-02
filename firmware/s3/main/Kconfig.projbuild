@@ -188,8 +188,10 @@ choice FPC2_PANEL_COLORS
     depends on BOARD_TYPE_SSD2683ZA_S3_EPD42
     default FPC2_PANEL_COLORS_4
     help
-        FPC2 彩色屏色数。4-color = 黑白黄红(BWRY)；3-color = 黑白红(BWR)。
-        当前实现按 4-color (SSD2683ZA BWRY) 驱动；3-color 为占位，待适配。
+        FPC2 彩色屏色数。4-color = 黑白黄红(BWRY)，由 SSD2683ZA 驱动；
+        3-color = 黑白红(BWR)，由微雪 SSD1683/UC8179 驱动（Uc1679Display）。
+        两种模式均已适配：后端 InkSight 统一下发 BW/RED 两平面，3-color 直喂、
+        4-color 经 PackInkSightFourColor 打包为 2bpp。
 
     config FPC2_PANEL_COLORS_4
         bool "4-color (B/W/Y/R)"

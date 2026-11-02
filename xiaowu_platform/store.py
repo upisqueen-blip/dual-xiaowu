@@ -207,6 +207,46 @@ class Store:
               FOREIGN KEY(device_id) REFERENCES devices(device_id)
             );
             CREATE INDEX IF NOT EXISTS idx_messages_device_created ON messages(device_id, created_at DESC);
+            CREATE TABLE IF NOT EXISTS published_apps (
+              app_id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+              scene TEXT NOT NULL, preview_url TEXT NOT NULL, entry TEXT NOT NULL DEFAULT '',
+              developer_id TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1,
+              review_note TEXT NOT NULL DEFAULT '', published_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS app_data_sources (
+              app_id TEXT PRIMARY KEY, endpoint TEXT NOT NULL DEFAULT '',
+              token TEXT NOT NULL DEFAULT '', sample_json TEXT NOT NULL DEFAULT '{}',
+              verdict TEXT NOT NULL DEFAULT 'fail', checks_json TEXT NOT NULL DEFAULT '[]',
+              checked_at TEXT NOT NULL DEFAULT '', last_error TEXT NOT NULL DEFAULT '',
+              updated_at TEXT NOT NULL,
+              FOREIGN KEY(app_id) REFERENCES sandbox_apps(app_id)
+            );
+            CREATE TABLE IF NOT EXISTS user_scenes (
+              user_id TEXT NOT NULL,
+              scene_key TEXT NOT NULL,
+              name TEXT NOT NULL,
+              eyebrow TEXT NOT NULL DEFAULT '',
+              desc TEXT NOT NULL DEFAULT '',
+              icon TEXT NOT NULL DEFAULT '',
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY(user_id, scene_key)
+            );
+            CREATE TABLE IF NOT EXISTS pairing_codes (
+              code TEXT PRIMARY KEY, app_id TEXT NOT NULL, developer_id TEXT NOT NULL DEFAULT '',
+              label TEXT NOT NULL DEFAULT '', scopes TEXT NOT NULL DEFAULT '[]',
+              status TEXT NOT NULL DEFAULT 'pending', device_id TEXT, user_id TEXT, grant_id TEXT,
+              created_at TEXT NOT NULL, expires_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS app_device_grants (
+              grant_id TEXT PRIMARY KEY, app_id TEXT NOT NULL, device_id TEXT NOT NULL,
+              user_id TEXT NOT NULL, scopes TEXT NOT NULL DEFAULT '[]', label TEXT NOT NULL DEFAULT '',
+              status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL,
+              revoked_at TEXT, last_push_at TEXT,
+              UNIQUE(app_id, device_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_grants_device ON app_device_grants(device_id, status);
+            CREATE INDEX IF NOT EXISTS idx_grants_user ON app_device_grants(user_id);
             """)
             columns = {row[1] for row in db.execute("PRAGMA table_info(devices)")}
             if "pending_refresh" not in columns:
@@ -329,6 +369,142 @@ class Store:
             row = db.execute("SELECT user_id FROM device_bindings WHERE device_id=?", (device_id,)).fetchone()
         return row["user_id"] if row else None
 
+    # ── 确权层：配对码（pairing code）+ 应用-设备授权（grant）────────────────
+    # 平台只回答「这条数据可以显示在哪块屏」：由已登录用户一次性确认，建立
+    # app_id + device_id + user_id 三元授权，全程不接触任何大模型凭证。
+    PAIRING_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+    @staticmethod
+    def _normalize_pairing_code(code: str) -> str:
+        return (code or "").replace("-", "").replace(" ", "").strip().upper()
+
+    def create_pairing_code(self, app_id: str, developer_id: str, label: str,
+                            scopes: list[str], ttl_seconds: int = 600) -> dict[str, Any]:
+        """为应用签发一次性绑定码（默认 10 分钟有效）。"""
+        code = ""
+        with self.connect() as db:
+            for _ in range(20):
+                candidate = "".join(secrets.choice(self.PAIRING_ALPHABET) for _ in range(6))
+                if not db.execute("SELECT 1 FROM pairing_codes WHERE code=?", (candidate,)).fetchone():
+                    code = candidate
+                    break
+            if not code:
+                raise RuntimeError("配对码生成失败：可用空间耗尽")
+            created = datetime.now(UTC)
+            expires = created + timedelta(seconds=ttl_seconds)
+            db.execute(
+                "INSERT INTO pairing_codes(code,app_id,developer_id,label,scopes,status,created_at,expires_at) "
+                "VALUES(?,?,?,?,?,'pending',?,?)",
+                (code, app_id, developer_id, label, json.dumps(scopes, ensure_ascii=False),
+                 created.isoformat(), expires.isoformat()),
+            )
+        return {"code": code, "display_code": f"{code[:3]}-{code[3:]}",
+                "expires_in": ttl_seconds, "expires_at": expires.isoformat()}
+
+    def get_pairing_code(self, code: str) -> dict[str, Any] | None:
+        """读取配对码；处于 pending 且已过期的，顺手落为 expired。"""
+        key = self._normalize_pairing_code(code)
+        if not key:
+            return None
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM pairing_codes WHERE code=?", (key,)).fetchone()
+            if not row:
+                return None
+            item = dict(row)
+            item["scopes"] = json.loads(item["scopes"] or "[]")
+            if item["status"] == "pending" and item["expires_at"] < now_iso():
+                db.execute("UPDATE pairing_codes SET status='expired' WHERE code=?", (key,))
+                item["status"] = "expired"
+        return item
+
+    def upsert_grant(self, app_id: str, device_id: str, user_id: str,
+                     scopes: list[str], label: str) -> dict[str, Any]:
+        """建立（或恢复）一条 app↔device↔user 授权。撤销后重新授权会复用同一行。"""
+        grant_id, now = "grant-" + secrets.token_hex(6), now_iso()
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO app_device_grants(grant_id,app_id,device_id,user_id,scopes,label,status,created_at,revoked_at,last_push_at) "
+                "VALUES(?,?,?,?,?,?,'active',?,NULL,NULL) "
+                "ON CONFLICT(app_id,device_id) DO UPDATE SET grant_id=excluded.grant_id,user_id=excluded.user_id,"
+                "scopes=excluded.scopes,label=excluded.label,status='active',created_at=excluded.created_at,revoked_at=NULL",
+                (grant_id, app_id, device_id, user_id, json.dumps(scopes, ensure_ascii=False), label, now),
+            )
+        return {"grant_id": grant_id, "app_id": app_id, "device_id": device_id, "user_id": user_id,
+                "scopes": scopes, "label": label, "status": "active", "created_at": now}
+
+    def approve_pairing_code(self, code: str, user_id: str, device_id: str) -> dict[str, Any]:
+        """用户确认授权。抛 LookupError/TimeoutError/ValueError/PermissionError 供上层转 HTTP。"""
+        item = self.get_pairing_code(code)
+        if not item:
+            raise LookupError("pairing_not_found")
+        if item["status"] == "expired":
+            raise TimeoutError("pairing_expired")
+        if item["status"] in ("approved", "denied"):
+            raise ValueError("pairing_already_used")
+        if not self.user_owns(user_id, device_id):
+            raise PermissionError("device_not_owned")
+        with self.connect() as db:
+            row = db.execute("SELECT scopes FROM developer_apps WHERE app_id=?", (item["app_id"],)).fetchone()
+        owned_scopes = set(json.loads(row["scopes"])) if row and row["scopes"] else set()
+        scopes = [s for s in item["scopes"] if s in owned_scopes]
+        if not scopes:
+            raise PermissionError("no_grantable_scope")
+        grant = self.upsert_grant(item["app_id"], device_id, user_id, scopes, item["label"])
+        with self.connect() as db:
+            db.execute("UPDATE pairing_codes SET status='approved',device_id=?,user_id=?,grant_id=? WHERE code=?",
+                       (device_id, user_id, grant["grant_id"], item["code"]))
+        return grant
+
+    def deny_pairing_code(self, code: str, user_id: str) -> bool:
+        key = self._normalize_pairing_code(code)
+        with self.connect() as db:
+            cur = db.execute("UPDATE pairing_codes SET status='denied',user_id=? WHERE code=? AND status='pending'",
+                             (user_id, key))
+            return cur.rowcount > 0
+
+    def get_active_grant(self, app_id: str, device_id: str) -> dict[str, Any] | None:
+        """推送前的授权校验：该应用对该设备是否仍有有效授权。"""
+        cands = _mac_candidates(device_id)
+        if not cands:
+            return None
+        marks = ",".join("?" for _ in cands)
+        with self.connect() as db:
+            row = db.execute(
+                f"SELECT * FROM app_device_grants WHERE app_id=? AND status='active' AND device_id IN ({marks})",
+                (app_id, *cands)).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        item["scopes"] = json.loads(item["scopes"] or "[]")
+        return item
+
+    def list_user_grants(self, user_id: str) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT g.*, a.name AS app_name FROM app_device_grants g "
+                "LEFT JOIN developer_apps a ON a.app_id=g.app_id "
+                "WHERE g.user_id=? ORDER BY g.created_at DESC", (user_id,)).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["scopes"] = json.loads(item["scopes"] or "[]")
+            out.append(item)
+        return out
+
+    def revoke_grant(self, grant_id: str, user_id: str | None = None) -> bool:
+        with self.connect() as db:
+            if user_id:
+                cur = db.execute("UPDATE app_device_grants SET status='revoked',revoked_at=? "
+                                 "WHERE grant_id=? AND user_id=?", (now_iso(), grant_id, user_id))
+            else:
+                cur = db.execute("UPDATE app_device_grants SET status='revoked',revoked_at=? WHERE grant_id=?",
+                                 (now_iso(), grant_id))
+            return cur.rowcount > 0
+
+    def touch_grant_push(self, grant_id: str) -> None:
+        with self.connect() as db:
+            db.execute("UPDATE app_device_grants SET last_push_at=? WHERE grant_id=?", (now_iso(), grant_id))
+
     def list_templates(self, enabled_only: bool = False) -> list[dict[str, Any]]:
         sql = "SELECT * FROM templates" + (" WHERE enabled=1" if enabled_only else "") + " ORDER BY category,name"
         with self.connect() as db:
@@ -443,12 +619,20 @@ class Store:
     def login(self, username: str, password: str) -> tuple[str, str] | None:
         with self.connect() as db:
             row = db.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
-            if not row or not secrets.compare_digest(row["password_hash"], self._password_hash(password, row["password_salt"])):
-                return None
-            token = secrets.token_urlsafe(32)
-            expires = (datetime.now(UTC) + timedelta(days=30)).isoformat()
-            db.execute("INSERT INTO user_sessions VALUES(?,?,?)", (self.hash_token(token), row["user_id"], expires))
-        return row["user_id"], token
+            if row and secrets.compare_digest(row["password_hash"], self._password_hash(password, row["password_salt"])):
+                token = secrets.token_urlsafe(32)
+                expires = (datetime.now(UTC) + timedelta(days=30)).isoformat()
+                db.execute("INSERT INTO user_sessions VALUES(?,?,?)", (self.hash_token(token), row["user_id"], expires))
+                return row["user_id"], token
+            # 管理员账号（admin_accounts）也可在内容后台登录，原后台体系共用
+            arow = db.execute("SELECT * FROM admin_accounts WHERE username=?", (username.strip(),)).fetchone()
+            if arow and arow["status"] == "active" and secrets.compare_digest(
+                    arow["password_hash"], self._password_hash(password, arow["password_salt"])):
+                token = secrets.token_urlsafe(32)
+                expires = (datetime.now(UTC) + timedelta(days=30)).isoformat()
+                db.execute("INSERT INTO user_sessions VALUES(?,?,?)", (self.hash_token(token), arow["admin_id"], expires))
+                return arow["admin_id"], token
+        return None
 
     def session_user(self, token: str) -> str | None:
         with self.connect() as db:
@@ -815,6 +999,55 @@ class Store:
             result["report"] = {}
         return result
 
+    # —— 轨2：数据接口（ISV 提供端点，后端实时渲染 e-ink 卡片）——
+    def save_app_data_source(self, app_id: str, endpoint: str, token: str,
+                             verdict: str, checks: list[dict[str, Any]],
+                             sample: dict[str, Any] | None, last_error: str = "") -> None:
+        ts = now_iso()
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO app_data_sources(app_id,endpoint,token,sample_json,verdict,checks_json,"
+                "checked_at,last_error,updated_at) VALUES(?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(app_id) DO UPDATE SET endpoint=excluded.endpoint,token=excluded.token,"
+                "verdict=excluded.verdict,checks_json=excluded.checks_json,checked_at=excluded.checked_at,"
+                "last_error=excluded.last_error,updated_at=excluded.updated_at,"
+                "sample_json=CASE WHEN excluded.sample_json='{}' THEN app_data_sources.sample_json "
+                "ELSE excluded.sample_json END",
+                (app_id, endpoint, token, json.dumps(sample or {}, ensure_ascii=False),
+                 verdict, json.dumps(checks or [], ensure_ascii=False), ts, last_error, ts),
+            )
+
+    def get_app_data_source(self, app_id: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT app_id,endpoint,token,sample_json,verdict,checks_json,checked_at,last_error,updated_at "
+                "FROM app_data_sources WHERE app_id=?", (app_id,),
+            ).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        try:
+            sample = json.loads(result.get("sample_json") or "{}")
+        except json.JSONDecodeError:
+            sample = {}
+        try:
+            checks = json.loads(result.get("checks_json") or "[]")
+        except json.JSONDecodeError:
+            checks = []
+        result["sample"] = sample
+        result["checks"] = checks
+        return result
+
+    def update_data_source_sample(self, app_id: str, sample: dict[str, Any]) -> None:
+        ts = now_iso()
+        with self.connect() as db:
+            db.execute("UPDATE app_data_sources SET sample_json=?,checked_at=?,updated_at=? WHERE app_id=?",
+                       (json.dumps(sample or {}, ensure_ascii=False), ts, ts, app_id))
+
+    def delete_app_data_source(self, app_id: str) -> None:
+        with self.connect() as db:
+            db.execute("DELETE FROM app_data_sources WHERE app_id=?", (app_id,))
+
     def submit_sandbox_app(self, app_id: str, developer_id: str, version: str, notes: str) -> bool:
         with self.connect() as db:
             cur = db.execute("UPDATE sandbox_apps SET status='in_review',version=?,review_note=?,updated_at=? "
@@ -827,6 +1060,100 @@ class Store:
         with self.connect() as db:
             cur = db.execute("UPDATE sandbox_apps SET status=?,review_note=?,updated_at=? WHERE app_id=? AND status='in_review'",
                              (status_value, note, now_iso(), app_id))
+            changed = cur.rowcount > 0
+        if changed:
+            if decision == "approve":
+                self.publish_app_catalog(app_id, note)
+            else:
+                self.set_published_app_enabled(app_id, 0)
+        return changed
+
+    # —— 已发布应用目录（审核通过的应用在此登记，供内容后台选择并配置到屏幕）——
+    def publish_app_catalog(self, app_id: str, review_note: str = "") -> None:
+        """审核通过时把应用登记到 published_apps 目录（enabled=1，可下线）。"""
+        app = self.sandbox_app_raw(app_id)
+        if not app:
+            return
+        build = self.get_sandbox_build(app_id) or {}
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO published_apps(app_id,name,description,scene,preview_url,entry,developer_id,enabled,review_note,published_at) "
+                "VALUES(?,?,?,?,?,?,?,1,?,?) "
+                "ON CONFLICT(app_id) DO UPDATE SET name=excluded.name,description=excluded.description,"
+                "scene=excluded.scene,preview_url=excluded.preview_url,entry=excluded.entry,"
+                "developer_id=excluded.developer_id,enabled=1,review_note=excluded.review_note,published_at=excluded.published_at",
+                (app_id, app["name"], app.get("description") or "", app["scene"],
+                 f"/sandbox/{app_id}/", build.get("entry") or "index.html",
+                 app.get("developer_id") or "", review_note or "", now_iso()),
+            )
+
+    def sandbox_app_raw(self, app_id: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT app_id,developer_id,name,scene,description,status,version,review_note,created_at,updated_at "
+                "FROM sandbox_apps WHERE app_id=?", (app_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_published_apps(self, enabled_only: bool = False) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM published_apps" + (" WHERE enabled=1" if enabled_only else "") + " ORDER BY published_at DESC"
+        with self.connect() as db:
+            return [dict(row) for row in db.execute(sql).fetchall()]
+
+    def get_published_app(self, app_id: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM published_apps WHERE app_id=?", (app_id,)).fetchone()
+        return dict(row) if row else None
+
+    def set_published_app_enabled(self, app_id: str, enabled: int) -> bool:
+        with self.connect() as db:
+            cur = db.execute("UPDATE published_apps SET enabled=? WHERE app_id=?", (1 if enabled else 0, app_id))
+        return cur.rowcount > 0
+
+    # —— 用户自定义场景（场景中心「自定义场景」持久化，按用户隔离）——
+    def create_user_scene(self, user_id: str, scene_key: str, name: str, eyebrow: str = "", desc: str = "", icon: str = "") -> None:
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO user_scenes(user_id,scene_key,name,eyebrow,desc,icon,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(user_id,scene_key) DO UPDATE SET "
+                "name=excluded.name,eyebrow=excluded.eyebrow,desc=excluded.desc,icon=excluded.icon,updated_at=excluded.updated_at",
+                (user_id, scene_key, name, eyebrow, desc, icon, now_iso(), now_iso()),
+            )
+
+    def list_user_scenes(self, user_id: str) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            return [dict(r) for r in db.execute(
+                "SELECT user_id,scene_key,name,eyebrow,desc,icon,created_at,updated_at "
+                "FROM user_scenes WHERE user_id=? ORDER BY created_at ASC",
+                (user_id,),
+            ).fetchall()]
+
+    def get_user_scene(self, user_id: str, scene_key: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT user_id,scene_key,name,eyebrow,desc,icon,created_at,updated_at "
+                "FROM user_scenes WHERE user_id=? AND scene_key=?",
+                (user_id, scene_key),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def update_user_scene(self, user_id: str, scene_key: str, fields: dict[str, Any]) -> bool:
+        allowed = {"name", "eyebrow", "desc", "icon"}
+        sets = {k: v for k, v in (fields or {}).items() if k in allowed}
+        if not sets:
+            return False
+        cols = ", ".join(f"{k}=?" for k in sets)
+        with self.connect() as db:
+            db.execute(
+                f"UPDATE user_scenes SET {cols}, updated_at=? WHERE user_id=? AND scene_key=?",
+                (*sets.values(), now_iso(), user_id, scene_key),
+            )
+        return True
+
+    def delete_user_scene(self, user_id: str, scene_key: str) -> bool:
+        with self.connect() as db:
+            cur = db.execute("DELETE FROM user_scenes WHERE user_id=? AND scene_key=?", (user_id, scene_key))
         return cur.rowcount > 0
 
     def save_model_config(self, app_id: str, provider: str, model: str, base_url: str,
@@ -857,11 +1184,47 @@ class Store:
             return None
         return {**dict(row), "scopes": json.loads(row["scopes"])}
 
+    def app_public(self, app_id: str) -> dict[str, Any] | None:
+        """确权页展示用：应用的公开信息（不返回 token_hash）。"""
+        with self.connect() as db:
+            row = db.execute("SELECT app_id,name,scopes,status,created_at FROM developer_apps WHERE app_id=?",
+                             (app_id,)).fetchone()
+        if not row:
+            return None
+        return {**dict(row), "scopes": json.loads(row["scopes"] or "[]")}
+
+    DEFAULT_APP_SCOPES = ["device.content.write", "device.read"]
+
+    def issue_app_credential(self, app_id: str, name: str,
+                             scopes: list[str] | None = None) -> dict[str, Any]:
+        """为沙箱应用签发/轮换 OpenAPI 凭证，复用同一 app_id 打通「内容应用」与「API 应用」。
+
+        轮换后旧 Token 立即失效（token_hash 被覆盖），调用方须提示开发者更新本地配置。
+        """
+        granted = list(scopes or self.DEFAULT_APP_SCOPES)
+        token = "xw_live_" + secrets.token_urlsafe(32)
+        token_hash = self.hash_token(token)
+        now = now_iso()
+        with self.connect() as db:
+            exists = db.execute("SELECT 1 FROM developer_apps WHERE app_id=?", (app_id,)).fetchone()
+            if exists:
+                db.execute("UPDATE developer_apps SET name=?,token_hash=?,scopes=?,status='active' WHERE app_id=?",
+                           (name, token_hash, json.dumps(granted), app_id))
+            else:
+                db.execute("INSERT INTO developer_apps(app_id,name,token_hash,scopes,status,created_at) "
+                           "VALUES(?,?,?,?,'active',?)", (app_id, name, token_hash, json.dumps(granted), now))
+        return {
+            "app_id": app_id,
+            "app_token": token,
+            "scopes": granted,
+            "issued_at": now,
+            "note": "Token 仅在此刻显示一次，请立即写入应用配置；重新签发会使旧 Token 立即失效。",
+        }
+
     def list_developer_apps(self) -> list[dict[str, Any]]:
         with self.connect() as db:
             rows = db.execute("SELECT app_id,name,scopes,status,created_at FROM developer_apps ORDER BY created_at DESC").fetchall()
         return [{**dict(row), "scopes": json.loads(row["scopes"])} for row in rows]
-
     def create_webhook(self, app_id: str, url: str, events: list[str]) -> tuple[str, str]:
         webhook_id, secret = "wh-" + secrets.token_hex(6), secrets.token_urlsafe(32)
         with self.connect() as db:

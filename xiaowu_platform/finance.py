@@ -43,11 +43,35 @@ _RETRIES = 2
 _CACHE_TTL = 60.0
 _MAX_CACHE = 256
 _cache: dict[str, tuple[float, Any]] = {}
+# 失败缓存：上游不可达（如本机网络封锁东财）时，别在每次渲染都重试刷错。
+_fail_cache: dict[str, tuple[float, Exception]] = {}
 _SECTOR_SINA_CACHE: Optional[tuple[float, list[dict]]] = None
+# 板块结果缓存：避免每屏渲染都去打一次注定失败的东财概念接口。
+_sectors_cache: Optional[tuple[float, dict[str, list[dict]]]] = None
 
 # 直连 opener：绕过 http_proxy/https_proxy 等环境代理，
 # 避免本机代理（Clash 等）劫持或断连公开行情接口。
 _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+# 东财 push2 主站在部分网络下偶发 RemoteDisconnected（服务端无响应直接断连）。
+# 依次尝试下列 CDN 镜像可显著提升命中率；配合 Connection: close 避免复用已失效的长连接。
+_EM_MIRRORS = [
+    "push2.eastmoney.com",
+    "push2delay.eastmoney.com",
+    "push2his.eastmoney.com",
+    "1.push2.eastmoney.com",
+    "2.push2.eastmoney.com",
+    "3.push2.eastmoney.com",
+    "4.push2.eastmoney.com",
+    "5.push2.eastmoney.com",
+    "7.push2.eastmoney.com",
+    "8.push2.eastmoney.com",
+    "9.push2.eastmoney.com",
+    "10.push2.eastmoney.com",
+    "11.push2.eastmoney.com",
+    "12.push2.eastmoney.com",
+    "13.push2.eastmoney.com",
+]
 
 # 市场摘要模式默认展示的三大指数
 INDEX_SUMMARY_CODES = ["sh000001", "sz399001", "sz399006"]
@@ -76,20 +100,39 @@ def _get_json(url: str) -> dict[str, Any]:
     hit = _cache.get(url)
     if hit and now - hit[0] < _CACHE_TTL:
         return hit[1]
-    req = urllib.request.Request(url, headers=_HEADERS)
+    # 近期已失败过：直接抛出缓存的异常，避免每次渲染都重新重试刷错日志。
+    fail = _fail_cache.get(url)
+    if fail and now - fail[0] < _CACHE_TTL:
+        raise fail[1]
+
+    parsed = urllib.parse.urlparse(url)
+    is_em = parsed.netloc.endswith("eastmoney.com")
+    # 东财：跨镜像 host 重试；非东财（腾讯）：仅原 host。
+    hosts = _EM_MIRRORS[:4] if is_em else [parsed.netloc]
+    # 东财镜像响应快、单次即可，减少每镜像内部重试；非东财沿用原重试次数。
+    inner = 1 if is_em else _RETRIES
+
     data: dict[str, Any] | None = None
     last_exc: Exception | None = None
-    for attempt in range(_RETRIES + 1):
-        try:
-            with _opener.open(req, timeout=_TIMEOUT) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+    for host in hosts:
+        cand = url if host == parsed.netloc else url.replace(parsed.netloc, host, 1)
+        req = urllib.request.Request(cand, headers={**_HEADERS, "Connection": "close"})
+        for attempt in range(inner + 1):
+            try:
+                with _opener.open(req, timeout=_TIMEOUT) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if attempt < inner:
+                    time.sleep(0.3 * (attempt + 1))
+        if data is not None:
             break
-        except Exception as exc:  # noqa: BLE001
-            last_exc = exc
-            if attempt < _RETRIES:
-                time.sleep(0.4 * (attempt + 1))
     if data is None:
-        raise last_exc if last_exc else RuntimeError("request failed")
+        exc = last_exc if last_exc else RuntimeError("request failed")
+        _fail_cache[url] = (now, exc)
+        raise exc
+    _fail_cache.pop(url, None)
     if len(_cache) >= _MAX_CACHE:
         oldest = min(_cache, key=lambda k: _cache[k][0])
         _cache.pop(oldest, None)
@@ -599,53 +642,43 @@ def search_security(keyword: str, count: int = 5) -> list[dict[str, Any]]:
 
 
 # ——— 黄金/期货（贵金属与商品期货主连）———
-# 东财 secid 已实测可用：113=上期所 101=COMEX 118=上金所 114=大商所
-GOLD_FUTURES_SECIDS: list[tuple[str, str]] = [
-    ("113.aum", "沪金主连"),
-    ("113.agm", "沪银主连"),
-    ("101.GC00Y", "COMEX黄金"),
-    ("118.AUTD", "黄金T+D"),
-    ("114.jm", "焦炭主连"),
-]
+# 沪金/沪银走新浪期货连续合约（nf_AU0/nf_AG0），COMEX 走腾讯外盘（hf_GC/hf_SI），
+# 其余（黄金T+D/焦炭）仍走东财兜底（无免费替代源时优雅占位）。
+GOLD_FUTURES_SRC: dict[str, tuple[str, str, str]] = {
+    "113.aum": ("sina", "nf_AU0", "沪金主连"),
+    "113.agm": ("sina", "nf_AG0", "沪银主连"),
+    "101.GC00Y": ("tencent", "hf_GC", "COMEX黄金"),
+    "101.SI00Y": ("tencent", "hf_SI", "COMEX白银"),
+    "118.AUTD": ("em", "", "黄金T+D"),
+    "114.jm": ("em", "", "焦炭主连"),
+}
 
 
 def fetch_gold_futures() -> list[dict[str, Any]]:
-    """贵金属/期货实时快照（固定标的池，secid 直查）。"""
-    url = (f"{_EM_QUOTE_URL}?fltt=2&invt=2&fields=f2,f3,f4,f12,f13,f14"
-           f"&secids={','.join(s for s, _ in GOLD_FUTURES_SECIDS)}")
-    try:
-        data = _get_json(url)
-    except Exception:
-        logger.warning("[FINANCE] gold/futures quote failed", exc_info=True)
-        return []
-    diff = ((data or {}).get("data") or {}).get("diff") or []
-    if isinstance(diff, dict):
-        diff = list(diff.values())
-    rows = {
-        str(row.get("f12") or ""): {
-            "code": str(row.get("f12") or ""),
-            "name": str(row.get("f14") or ""),
-            "price": _num(row.get("f2")),
-            "pct": _num(row.get("f3")),
-            "chg": _num(row.get("f4")),
-            "market": int(row.get("f13") or 0),
-        }
-        for row in diff
-    }
-    # 按定义顺序输出，缺行情的也保留占位
-    return [rows.get(secid.split(".")[-1]) or {"code": secid.split(".")[-1], "name": name,
-                                               "price": None, "pct": None, "chg": None, "market": 0}
-            for secid, name in GOLD_FUTURES_SECIDS]
+    """贵金属/期货实时快照：沪金/沪银→新浪，COMEX→腾讯，其余→东财兜底。"""
+    out: list[dict[str, Any]] = []
+    for secid, (src, code, name) in GOLD_FUTURES_SRC.items():
+        if src == "sina":
+            out.append(_sina_future(code, name))
+        elif src == "tencent":
+            q = _tencent_future(code)
+            q["name"] = name
+            q.setdefault("code", secid)
+            out.append(q)
+        else:  # em
+            eq = fetch_secid_quotes([secid])
+            out.append(eq.get(secid) or {"code": secid, "name": name,
+                                         "price": None, "pct": None, "chg": None})
+    return out
 
 
 # ── 多市场大盘指数 / 商品（参考东方财富行情中心，适配墨水屏）────────
-# A 股指数走腾讯公开接口（fetch_quotes，已验证）；港股/美股/日经/商品/板块走东财公开接口。
-# secid 规则：A 股 sh/sz + 6 位；港股/美股/日经 100.xxx；期货/商品 113/101/115.xxx。
-# 取不到行情的行显示占位（--），不阻断整屏渲染；secid 以实测为准，失败可在本表修正。
-#
-# 腾讯备源：东财公开接口对海外/商品指数偶发限流（RemoteDisconnected），而腾讯 qt.gtimg.cn
-# 对港股(hk)、美股(us)、外盘期货(hf) 同样覆盖，且更稳定。故海外指数与商品默认「腾讯主源 +
-# 东财兜底」，沪金/沪银(113) 与日经(100.N225) 无腾讯等价则仅走东财。
+# A 股指数走腾讯公开接口（fetch_quotes，已验证）；港股/美股走腾讯（hk/us 前缀，稳定）。
+# 商品中 COMEX 金/银走腾讯外盘期货（hf_GC/hf_SI）；沪金/沪银(113) 走新浪期货连续合约
+# （nf_AU0/nf_AG0），彻底避开被封锁的东方财富实时接口。
+# 日经225(100.N225) 无免费替代源（腾讯/新浪均无），已从大盘指数分组移除。
+# secid 规则：A 股 sh/sz + 6 位；港股/美股 100.xxx；期货/商品 113/101.xxx。
+# 取不到行情的行显示占位（--），不阻断整屏渲染。
 SECID_TO_TENCENT: dict[str, Optional[str]] = {
     "100.HSI": "hkHSI",
     "100.HSTECH": "hkHSTECH",
@@ -729,12 +762,46 @@ def _fetch_with_tencent_fallback(secid: str, name: str,
     return q
 
 
+# 沪金/沪银（上期所主连）新浪期货连续合约：东财被封锁时以此替代。
+# 新浪 hq 字段：[6]=最新价 [27]=昨收，自算涨跌幅%。
+SINA_FUTURES: dict[str, str] = {
+    "113.aum": "nf_AU0",   # 沪金主连
+    "113.agm": "nf_AG0",   # 沪银主连
+}
+_SINA_HQ_URL = "https://hq.sinajs.cn/list="
+
+
+def _sina_future(sina_code: str, name: str) -> dict[str, Any]:
+    """新浪期货连续合约（沪金 nf_AU0 / 沪银 nf_AG0）：[6]=最新价 [27]=昨收，自算涨跌幅%。"""
+    empty = {"code": sina_code, "name": name, "price": None, "pct": None, "chg": None}
+    try:
+        req = urllib.request.Request(
+            _SINA_HQ_URL + sina_code,
+            headers={**_HEADERS, "Referer": "https://finance.sina.com.cn/"},
+        )
+        with _opener.open(req, timeout=_TIMEOUT) as resp:
+            text = resp.read().decode("gbk", errors="replace")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[FINANCE] sina future failed %s: %s", sina_code, exc)
+        return empty
+    m = re.search(r'"([^"]*)"', text)
+    if not m:
+        return empty
+    parts = m.group(1).split(",")
+    try:
+        price = _num(float(parts[6]))
+        prev = _num(float(parts[27])) if len(parts) > 27 and parts[27] else None
+    except (ValueError, IndexError):
+        return empty
+    pct = ((price - prev) / prev * 100) if (price is not None and prev) else None
+    return {"code": sina_code, "name": name, "price": price, "pct": pct, "chg": None}
+
+
 MARKET_INDEX_GROUPS = [
     ("A股", ["sh000001", "sz399001", "sz399006", "sh000300", "sh000016"],
             ["上证指数", "深证成指", "创业板指", "沪深300", "上证50"]),
     ("港股", ["100.HSI", "100.HSTECH"], ["恒生指数", "恒生科技"]),
     ("美股", ["100.DJIA", "100.SPX", "100.IXIC"], ["道琼斯", "标普500", "纳斯达克"]),
-    ("亚太", ["100.N225"], ["日经225"]),
 ]
 
 COMMODITY_GROUPS = [
@@ -796,12 +863,18 @@ def fetch_market_indices() -> list[tuple[str, list[dict]]]:
 
 
 def fetch_commodities() -> list[tuple[str, list[dict]]]:
-    """分组返回贵金属/商品快照：[(分组名, [quote...]), ...]。腾讯主源 + 东财兜底。"""
+    """分组返回贵金属/商品快照：[(分组名, [quote...]), ...]。
+
+    沪金/沪银走新浪期货（nf_AU0/nf_AG0），其余（COMEX 等）走腾讯主源 + 东财兜底。
+    """
     result: list[tuple[str, list[dict]]] = []
     for grp, codes, names in COMMODITY_GROUPS:
         quotes = []
         for sid, nm in zip(codes, names):
-            quotes.append(_fetch_with_tencent_fallback(sid, nm, SECID_TO_TENCENT.get(sid)))
+            if sid in SINA_FUTURES:
+                quotes.append(_sina_future(SINA_FUTURES[sid], nm))
+            else:
+                quotes.append(_fetch_with_tencent_fallback(sid, nm, SECID_TO_TENCENT.get(sid)))
         result.append((grp, quotes))
     return result
 
@@ -813,7 +886,7 @@ def _fetch_sector_list(fs: str, limit: int = 8) -> list[dict]:
     try:
         data = _get_json(url)
     except Exception:  # noqa: BLE001
-        logger.warning("[FINANCE] sector list failed fs=%s", fs, exc_info=True)
+        logger.warning("[FINANCE] sector list unavailable fs=%s", fs)
         return []
     diff = ((data or {}).get("data") or {}).get("diff") or []
     if isinstance(diff, dict):
@@ -911,12 +984,34 @@ def _fetch_sector_list_sina() -> list[dict]:
 
 
 def fetch_sectors() -> dict[str, list[dict]]:
-    """板块动向：行业板块（新浪主源 + 东财兜底）/ 概念板块（东财，生产可用）。"""
+    """板块动向：行业板块（新浪主源 + 东财兜底）。
+
+    概念板块无稳定免费源（东财被封锁、新浪概念接口已下线），故 B 屏「更多行业」区
+    直接复用新浪行业板块数据（扣除已展示的前 4 行），彻底去除对东方财富的依赖，
+    保证 B 屏板块区域始终有数据、不依赖东财。
+    """
+    global _sectors_cache
+    now = time.time()
+    if _sectors_cache and now - _sectors_cache[0] < _CACHE_TTL:
+        return _sectors_cache[1]
     industry = _fetch_sector_list_sina()
     if not industry:
         industry = _fetch_sector_list("m:90+t:2")  # 新浪不可达时回落东财
-    concept = _fetch_sector_list("m:90+t:3")  # 概念板块东财有、新浪无等价公开源
-    return {"industry": industry[:8], "concept": concept[:8]}
+    # 新浪行业榜存在同名重复条目，按名称去重，避免 B 屏显示重复板块。
+    seen: set[str] = set()
+    deduped: list[dict] = []
+    for r in industry:
+        nm = r.get("name") or ""
+        if nm in seen:
+            continue
+        seen.add(nm)
+        deduped.append(r)
+    industry = deduped
+    # 「更多行业」区：复用新浪行业榜单，展示前 4 行之外的行业，避免与上方重复。
+    concept = industry[4:8] if len(industry) > 4 else list(industry)
+    result = {"industry": industry[:8], "concept": concept[:8]}
+    _sectors_cache = (now, result)
+    return result
 
 
 # ── A 屏：大盘全景（1-bit 黑白，2 列网格） ───────────────────
@@ -947,14 +1042,21 @@ def render_market_board(groups: list, w: int, h: int, title: str = "大盘全景
     for idx, (g, q) in enumerate(items):
         r = idx // cols
         c = idx % cols
-        x = pad + c * col_w
+        col_left = pad + c * col_w
+        col_center = col_left + col_w / 2
         y = top + r * row_h
         cy = y + row_h / 2
         name = str(q.get("name") or q.get("code") or "--")
-        draw.text((x, cy - row_h * 0.42), name, fill=0, font=f_name)
         price = _fmt(q.get("price"))
         pct = _pct_text(q.get("pct"))
-        draw.text((x, cy + int(2 * s)), f"{price}  {pct}", fill=0, font=f_val)
+        val_line = f"{price}  {pct}"
+        # 每列内容在其半区内水平居中，使中线两侧视觉对称、分割线显得居中
+        nw = draw.textlength(name, font=f_name)
+        vw = draw.textlength(val_line, font=f_val)
+        nx = max(col_left + int(3 * s), min(col_center - nw / 2, col_left + col_w - int(3 * s) - nw))
+        vx = max(col_left + int(3 * s), min(col_center - vw / 2, col_left + col_w - int(3 * s) - vw))
+        draw.text((nx, cy - row_h * 0.42), name, fill=0, font=f_name)
+        draw.text((vx, cy + int(2 * s)), val_line, fill=0, font=f_val)
     # 列分隔线（仅当双列且行数 > 1）；自页眉线起向下贯通，框出网格
     if rows_n > 1:
         draw.line([(pad + col_w, int(34 * s)), (pad + col_w, bottom)], fill=0, width=1)
@@ -990,7 +1092,7 @@ def render_sectors(sectors: dict, commodities: list, w: int, h: int, colors: int
     y += int(18 * s)
     y = _draw_sector_rows(draw, (sectors.get("industry") or [])[:4], pad, y, w, s, f_bar, red, fg)
     y += int(3 * s)
-    draw.text((pad, y), "概念板块", fill=fg, font=f_sec)
+    draw.text((pad, y), "更多行业", fill=fg, font=f_sec)
     y += int(18 * s)
     y = _draw_sector_rows(draw, (sectors.get("concept") or [])[:3], pad, y, w, s, f_bar, red, fg)
     y += int(3 * s)

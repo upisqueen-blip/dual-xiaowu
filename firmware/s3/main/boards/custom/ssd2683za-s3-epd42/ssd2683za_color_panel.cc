@@ -163,17 +163,23 @@ void Ssd2683zaColorPanel::SendDataStream(const uint8_t* data, size_t length) {
 
 bool Ssd2683zaColorPanel::InitializePanel() {
     if (!spi_) return false;
-    // 复位前读到的是「空闲电平」，取反即 BUSY 有效电平 —— 自适应模组极性。
-    // 参考驱动按「忙=低」写，但实测有的模组（含部分 Y683 批次）空闲为低、
-    // 忙为高；极性反了会让 WaitBusy 一进去就死等 5s 超时，整块屏被判为不存在。
-    const int idle_level = gpio_get_level(EPD_COLOR_BUSY_PIN);
+    HardwareReset();
+    // 复位后模组进入确定态，此时读到的 BUSY 即为「空闲电平」，取反即得有效电平。
+    // 比复位前读更可靠：上电瞬间 BUSY 引脚可能浮空/抖动，单次读数会把高电平误判
+    // 为空闲而选错极性（本板 Y683 实测「忙=高、空闲=低」，与参考驱动相反），
+    // 选反后 WaitBusy 进去就死等超时，整块屏被判为不存在。复位后短延 + 连读去抖
+    // 取稳定值，彻底消除该误判。
+    vTaskDelay(pdMS_TO_TICKS(30));
+    int idle_level = gpio_get_level(EPD_COLOR_BUSY_PIN);
+    for (int i = 0; i < 3; ++i) {
+        vTaskDelay(pdMS_TO_TICKS(8));
+        const int now = gpio_get_level(EPD_COLOR_BUSY_PIN);
+        if (now != idle_level) idle_level = now;  // 以最近稳定值为准
+    }
     busy_active_level_ = idle_level == 0 ? 1 : 0;
-    ESP_LOGI(kTag, "FPC2 pre-reset BUSY(GPIO%d)=%d → 判为空闲电平, BUSY 有效电平=%d%s",
+    ESP_LOGI(kTag, "FPC2 post-reset BUSY(GPIO%d)=%d → BUSY 有效电平=%d%s",
              EPD_COLOR_BUSY_PIN, idle_level, busy_active_level_,
              busy_active_level_ == kBusyActiveLevel ? "" : " (与参考驱动相反，已自适应)");
-    HardwareReset();
-    ESP_LOGI(kTag, "FPC2 post-reset BUSY(GPIO%d)=%d",
-             EPD_COLOR_BUSY_PIN, gpio_get_level(EPD_COLOR_BUSY_PIN));
     if (!WaitBusy(5000)) return false;
 
     // SSD2683ZA 4-color sequence, matching the known-good SSD2683ZA alias in

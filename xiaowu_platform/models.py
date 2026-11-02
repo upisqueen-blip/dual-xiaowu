@@ -124,6 +124,12 @@ class GithubImportIn(BaseModel):
     entry: str = Field(default="", max_length=200)
 
 
+class DataSourceIn(BaseModel):
+    endpoint: str = Field(min_length=8, max_length=500)
+    token: str = Field(default="", max_length=300)
+    sample: dict[str, Any] | None = None
+
+
 class ReviewDecision(BaseModel):
     decision: Literal["approve", "reject"]
     note: str = Field(default="", max_length=1000)
@@ -132,6 +138,19 @@ class ReviewDecision(BaseModel):
 class WebhookCreate(BaseModel):
     url: str = Field(min_length=10, max_length=500, pattern=r"^https://")
     events: list[Literal["device.event", "task.displayed", "task.failed"]]
+
+
+class PairingStartIn(BaseModel):
+    """ISV 申请一次性绑定码：label 会显示在用户的授权列表里，必须写真实设备名。"""
+
+    label: str = Field(default="", max_length=40)
+    scopes: list[str] = Field(default_factory=lambda: ["device.content.write"])
+
+
+class PairingConfirmIn(BaseModel):
+    """用户确认授权时选定的设备（必须是该用户已绑定的设备）。"""
+
+    device_id: str = Field(min_length=4, max_length=64)
 
 
 class DeviceEvent(BaseModel):

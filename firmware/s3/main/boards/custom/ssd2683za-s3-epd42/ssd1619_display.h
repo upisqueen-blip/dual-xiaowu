@@ -28,6 +28,10 @@ public:
                           int duration_ms = 3000) override;
     EpaperDashboard& dashboard() { return dashboard_; }
 
+    // 开机首页菜单（口语/阅读…）。默认在构造函数里调用，但 board 可在
+    // 已配置 InkSight/双屏时跳过它，让网络图成为开机第一屏，避免双闪。
+    void ShowBootHome();
+
     // 直接用 caller 提供的帧缓冲刷新画面。
     // frame: 50*300=15000 字节，1-bit/行/MSB 左白 1/黑 0。
     // partial=true: 差分快刷；false: 全刷清残影。
@@ -69,6 +73,10 @@ private:
     // （CS 与 BUSY 对不上同一块屏）/ 该屏不支持 SSD1619 命令集。置位后不再
     // 做极性翻转，避免在 0↔1 之间来回震荡、每轮白等几秒。
     bool busy_stuck_ = false;
+    // BUSY 引脚是否真的被面板驱动（由 DetectPanelConnector 的 IsBusyLineDriven
+    // 判定）。浮空=false 时说明 FPC 没插好/断线，此时 WaitRefreshComplete 的
+    // 定时兜底只是空转，应判失败让上层重试自愈，而不是假装刷成功把屏钉死。
+    bool busy_driven_ = true;
     // 实际在用的 CS / BUSY。DIN/CLK/DC/RST 两个座共用，只有 CS 和 BUSY 是
     // 每个座一份，所以"插错座"等价于这两个引脚选错：CS 不对则面板收不到命令，
     // BUSY 不对则读到的是浮空脚。启动时探测后填真值。

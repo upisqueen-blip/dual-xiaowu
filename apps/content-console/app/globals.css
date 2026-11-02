@@ -183,3 +183,30 @@ label.mini select{width:auto;min-width:96px}
 @media(max-width:1050px){.schedule-workspace-grid{grid-template-columns:1fr}.schedule-compose-card{order:-1}}
 @media(max-width:650px){.schedule-overview{align-items:flex-start;flex-direction:column;padding:17px}.schedule-stats{width:100%}.schedule-stats span{flex:1}.schedule-calendar-card,.schedule-compose-card{padding:14px}.schedule-days button{height:40px}.family-day-screen,.family-week-screen{padding:7px}.family-day-screen .family-event-row{grid-template-columns:27px 4px minmax(0,1fr);gap:3px}.family-day-screen .family-event-row em{display:none}.family-side-widgets{gap:3px}.family-check-row{font-size:6px}}
 .weather-board{gap:2px}.weather-board-main{flex:none;height:132px}.weather-board-meta{padding:3px 0;border-top:1px solid #aaa}.weather-board-sun{flex:none;display:flex;align-items:center;gap:7px;font-size:10px;line-height:1.25;padding:2px 0}.weather-board-sun i{height:12px;border-left:1px solid #999}.weather-board-advice{min-height:34px;display:grid;place-items:center;margin-top:1px}.weather-board-footer{margin-top:auto;min-height:18px;border-top:1px solid #444;padding-top:3px;display:flex;align-items:center;justify-content:space-between;font-size:9px;line-height:1}.weather-board-footer span:first-child{display:flex;align-items:center;gap:3px}
+
+/* 已上线应用（内容后台） */
+.app-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px}
+.app-card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px;display:flex;flex-direction:column;gap:13px}
+.app-card-main{display:flex;flex-direction:column;gap:6px}
+.app-badge{align-self:flex-start;font-size:9px;font-weight:800;letter-spacing:.1em;color:#3c7a57;background:#e6f0e9;border:1px solid #cfe3d4;border-radius:20px;padding:2px 9px}
+.app-badge.isv{color:#8a6d1f;background:#fbf2dc;border-color:#ecd9a8}
+.app-card h3{font-family:serif;margin:2px 0 0;font-size:19px}
+.app-card code{font-size:9px;color:var(--muted);background:#f0f1ec;border-radius:6px;padding:2px 6px;align-self:flex-start}
+.app-card p{font-size:11px;line-height:1.5;color:var(--muted);margin:0;min-height:16px}
+.app-actions{display:flex;gap:8px}
+.pub-app-pick{display:flex;flex-direction:column;gap:8px;margin-top:2px;padding:12px 14px;background:#fbf7ec;border:1px dashed #e3d4a6;border-radius:12px}
+.pub-app-pick label{display:flex;flex-direction:column;gap:6px;font-size:12px;font-weight:700;color:var(--ink)}
+.pub-app-pick select{flex:1;padding:8px 10px;border:1px solid var(--line);border-radius:9px;background:var(--card);font-size:13px;color:var(--ink)}
+.pub-app-empty{font-size:11px;font-weight:500;color:#9a7b2e;line-height:1.5}
+
+/* 场景中心：自定义场景单元格 / 删除 / 新建 / 表单 */
+.scene-cell{position:relative;display:flex}
+.scene-cell .scene-card{flex:1;text-align:left}
+.scene-del{position:absolute;top:12px;right:12px;z-index:2;width:30px;height:30px;display:flex;align-items:center;justify-content:center;border:1px solid var(--line);background:#fff;color:var(--red);border-radius:9px}
+.scene-del:hover{background:#fdecea}
+.scene-add{border:1px dashed var(--line);align-items:center;justify-content:center;text-align:center;color:var(--muted)}
+.scene-add .scene-icon{color:var(--green)}
+.scene-add h3{color:var(--green)}
+.scene-form{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:14px 0 16px}
+.scene-form label{display:flex;flex-direction:column;gap:6px;font-size:11px;color:var(--muted)}
+.scene-form label.full{grid-column:1/-1}

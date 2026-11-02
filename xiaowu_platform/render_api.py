@@ -152,14 +152,57 @@ def preview(
     sceneKey: Optional[str] = Query(default=None),
     aMode: Optional[str] = Query(default=None),
     bMode: Optional[str] = Query(default=None),
+    appId: Optional[str] = Query(default=None),
     x_device_token: Optional[str] = Header(default=None),
 ):
     """浏览器快照预览：返回 PNG，便于在内容后台/小程序直接核对设备将显示的内容。
 
     支持即时预览覆盖参数 aMode/bMode/sceneKey：无需保存设备配置，直接按所选屏模式渲染，
     供内容后台「双屏配置」下拉切换模式时即时预览（与设备渲染同源，所见即所得）。
+
+    支持 appId：开发者提交前 / 运营审核前，按「已上线应用 / 沙箱应用」解析出名称、简介、
+    场景与入口，渲染该应用在海报卡模式下的真实出图（A 黑白 / B 四色），提前核对设备显示。
     """
     screen = "B" if str(persona or "").upper() == "DUAL_B" else "A"
+
+    # 应用出图预览：按 appId 渲染「已上线应用」海报卡（与固件同源）
+    if appId:
+        info = store.get_published_app(appId) or store.sandbox_app_raw(appId)
+        if not info:
+            img = render_error("DEMO", w, h)
+            return Response(content=image_to_png_bytes(img), media_type="image/png",
+                            headers={"X-Preview-App": "not-found"})
+        name = info.get("name") or "已上线应用"
+        desc = info.get("description") or ""
+        scene = info.get("scene") or "office"
+        preview_url = info.get("preview_url") or ""
+        if not preview_url:
+            build = store.get_sandbox_build(appId)
+            preview_url = (build or {}).get("preview_url") or f"/sandbox/{appId}/"
+        sk = (sceneKey or scene).strip() or "office"
+        override_cfg = {
+            "version": 1,
+            "sceneKey": sk,
+            "screen": {"size": "4.2", "colors": colors},
+            "config": {
+                sk: {
+                    "a": {"mode": "published-app", "appId": appId, "title": name, "description": desc,
+                          "scene": scene, "source": preview_url},
+                    "b": {"mode": "published-app", "appId": appId, "title": name, "description": desc,
+                          "scene": scene, "source": preview_url},
+                }
+            },
+        }
+        try:
+            if screen == "B":
+                img = render_dual_screen("DEMO", "B", w, h, colors, override_cfg)
+            else:
+                img = render_dual_screen("DEMO", "A", w, h, 2, override_cfg)
+        except Exception:  # noqa: BLE001
+            img = render_error("DEMO", w, h)
+        return Response(content=image_to_png_bytes(img), media_type="image/png",
+                        headers={"X-Preview-App": appId, "X-Cache-Hit": "0"})
+
     # 即时预览覆盖：按所选模式直接出图（不依赖已保存的设备配置）
     if aMode or bMode or sceneKey:
         sk = (sceneKey or "finance").strip() or "finance"

@@ -15,6 +15,7 @@
 
 #if EPD_ENABLE_COLOR_SCREEN
 #include "ssd2683za_color_panel.h"
+#include "uc1679_display.h"
 #endif
 
 #if !CONFIG_EPD_PANEL_UC8253_37
@@ -108,6 +109,11 @@ Ssd1619Display::Ssd1619Display()
     // or overlapping second update leaves a perfectly valid but blank screen.
     dashboard_.SetRefreshCallback(
         [this](bool partial, bool force) { RequestRefresh(partial, force); });
+    // 开机首页菜单不再在构造函数里渲染：已配置 InkSight/双屏时 board 会跳过它，
+    // 让网络图成为开机第一屏（消除双闪）；未配置时才由 board 调 ShowBootHome()。
+}
+
+void Ssd1619Display::ShowBootHome() {
     dashboard_.Show(EpaperDashboard::Page::kHome);
 }
 
@@ -248,6 +254,18 @@ void Ssd1619Display::InitializeSpi() {
 
 void Ssd1619Display::HardwareReset() {
 #if EPD_ENABLE_COLOR_SCREEN
+    // FPC2 彩色屏正在全刷时（~16s），共享 RST 会打断其波形，须等待完成。
+    // 驱动随 FPC2_PANEL_COLORS 切换（3-color→SSD1683，4-color→SSD2683ZA）。
+#if FPC2_COLOR_COUNT == 3
+    if (Uc1679Display::IsRefreshing()) {
+        ESP_LOGW(kTag, "Shared RST: waiting for color refresh to finish");
+        const TickType_t start = xTaskGetTickCount();
+        while (Uc1679Display::IsRefreshing() &&
+               (xTaskGetTickCount() - start) * portTICK_PERIOD_MS < 30000) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+    }
+#else
     if (Ssd2683zaColorPanel::IsRefreshing()) {
         ESP_LOGW(kTag, "Shared RST: waiting for color refresh to finish");
         const TickType_t start = xTaskGetTickCount();
@@ -256,6 +274,7 @@ void Ssd1619Display::HardwareReset() {
             vTaskDelay(pdMS_TO_TICKS(50));
         }
     }
+#endif
 #endif
     // The 4.2-inch SSD1619 reference sequence uses three reset pulses.
     for (int i = 0; i < 3; ++i) {
@@ -312,7 +331,10 @@ bool Ssd1619Display::WaitRefreshComplete(int idle_level, uint32_t timeout_ms,
                 if (elapsed < busyless_total_ms) {
                     vTaskDelay(pdMS_TO_TICKS(busyless_total_ms - elapsed));
                 }
-                return true;
+                // 若 BUSY 线确认未被面板驱动（浮空/没插屏），定时兜底只是空转，
+                // 应判为失败让上层重试/锁存自愈，而不是假装刷成功把屏钉死。
+                // 真·无 BUSY 线但确实驱动的兼容面板（busy_driven_=true）仍返回成功。
+                return busy_driven_;
             }
             ESP_LOGE(kTag,
                      "SSD1619 BUSY did not leave idle level %d after 0x20 "
@@ -448,6 +470,11 @@ bool Ssd1619Display::DetectPanelConnector() {
 
     const bool driven[kCount] = {IsBusyLineDriven(busy[0]),
                                  IsBusyLineDriven(busy[1])};
+    // driven[0] 即本 SSD1619 显示（FPC1）的 BUSY 是否被面板真实驱动。
+    // 浮空（没插屏/断线）时记下 false，供 WaitRefreshComplete 区分"真·无 BUSY
+    // 兼容面板"与"线断了"——后者应判刷新失败并走锁存/重探测自愈。
+    busy_driven_ = driven[0];
+
 
     ESP_LOGI(kTag,
              "屏座探测：FPC1/GPIO%d 电平=%d 驱动=%s 跳变=%s；"

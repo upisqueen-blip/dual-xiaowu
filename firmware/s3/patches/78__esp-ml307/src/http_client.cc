@@ -19,8 +19,11 @@ HttpClient::HttpClient(NetworkInterface* network, int connect_id)
 HttpClient::~HttpClient() {
     // 先失效回调，再关闭连接：接收任务可能在 Close() 返回后仍被调度一次
     if (alive_) *alive_ = false;
-    if (connected_) {
-        Close();
+    if (tcp_) {
+        tcp_->OnStream({});
+        tcp_->OnDisconnected({});
+        tcp_->Disconnect();
+        connected_ = false;
     }
     vEventGroupDelete(event_group_handle_);
 }

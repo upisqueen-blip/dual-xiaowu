@@ -25,6 +25,7 @@
 #include "ssd1619_display.h"
 #if EPD_ENABLE_COLOR_SCREEN
 #include "ssd2683za_color_panel.h"
+#include "uc1679_display.h"
 #endif
 #include "wifi_board.h"
 #include "lvgl_image.h"
@@ -46,6 +47,9 @@ namespace {
 constexpr const char* kTag = "Ssd2683zaS3Board";
 
 #if EPD_ENABLE_COLOR_SCREEN
+// 仅 4-color(SSD2683ZA BWRY) 需要把 BW/RED 平面打包成 2bpp；3-color(SSD1683 BWR)
+// 直接喂两平面（见 ShowColorFrame），故本函数只在 4-color 编译。
+#if FPC2_COLOR_COUNT == 4
 // Match the existing SSD2683ZA reference driver: RAM codes are black=0,
 // white=1, yellow=2, red=3. Load2bpp returns B/W and red-marker planes,
 // preserving yellow vs red by whether the underlying B/W pixel is white.
@@ -70,6 +74,7 @@ void PackInkSightFourColor(const uint8_t* bw_plane, const uint8_t* red_plane,
             (panel_color << shift));
     }
 }
+#endif  // FPC2_COLOR_COUNT == 4
 #endif
 }
 
@@ -86,13 +91,20 @@ private:
     std::atomic<bool> recording_{false};
 
 #if EPD_ENABLE_COLOR_SCREEN
-    // FPC2/CS1：SSD2683ZA 四色屏（相册/InkSight 图像），尺寸由 menuconfig
-    // （FPC2_PANEL_SIZE）决定，默认 4.2"。
+    // FPC2 彩色图像屏（相册/InkSight/双屏 B 屏），驱动随 menuconfig
+    // FPC2_PANEL_COLORS 切换：3-color(B/W/R) → 微雪 SSD1683(Uc1679Display)，
+    // 4-color(B/W/Y/R) → SSD2683ZA(Ssd2683zaColorPanel)。两驱动共用 FPC1 的
+    // SPI/DC/RST，仅 CS/BUSY 独立（GPIO9/12）。
     // FPC1/CS2：SSD1619 对话信息屏 + 学习 dashboard（快刷）。
-    Ssd2683zaColorPanel* color_screen_ = nullptr;
-    uint8_t* color_bw_ = nullptr;   // FPC2 1bpp 平面（1=白），大小见 Ssd2683zaColorPanel
+#if FPC2_COLOR_COUNT == 3
+    using ColorPanelT = Uc1679Display;
+#else
+    using ColorPanelT = Ssd2683zaColorPanel;
+#endif
+    ColorPanelT* color_screen_ = nullptr;
+    uint8_t* color_bw_ = nullptr;   // FPC2 1bpp 平面（1=白），大小见对应驱动
     uint8_t* color_red_ = nullptr;  // FPC2 1bpp 平面（1=红）
-    uint8_t* color_frame_ = nullptr;  // FPC2 2bpp 帧，SSD2683ZA BWRY
+    uint8_t* color_frame_ = nullptr;  // 4-color 驱动用的 2bpp 帧（SSD2683ZA BWRY）
     TaskHandle_t color_refresh_task_ = nullptr;
     std::atomic<bool> inksight_device_unbound_{false};
     // 双屏后台模式：dual-config（课程表/便签）存在时，定时刷新改为拉取
@@ -102,6 +114,9 @@ private:
     // 固件据此在常规彩屏刷新周期之外尽快刷新新配置。
     std::string dual_config_revision_;
     std::atomic<bool> dual_refresh_pending_{false};
+    // 开机跳过首页菜单后，若首刷网络图失败（断网/服务器不可达），用这个 once
+    // 标志确保只回退显示一次首页菜单，避免白屏且不在每个刷新周期重复全闪。
+    std::atomic<bool> boot_home_fallback_done_{false};
 
     enum class PowerMode : int { kIntermittent = 0, kActive = 1 };
     PowerMode power_mode_ = PowerMode::kActive;
@@ -221,15 +236,32 @@ private:
         if (color_screen_ != nullptr) return;
         // The color panel shares DC/RST with the SSD1619. Keep it completely
         // untouched during provisioning so the fast panel can show the prompt.
+        // FPC2 上电初始化偶发失败：BUSY 引脚上电瞬态/电源未稳，会让极性被误判
+        // 或面板复位后迟迟不释放 BUSY（同一次上电首次激活却曾成功）。复位稳定后
+        // 多试几次即可恢复，避免彩色屏整段不可用。
+#if FPC2_COLOR_COUNT == 3
+        auto* candidate = new Uc1679Display([this]() {
+            return display_ != nullptr && display_->IsPanelBusy();
+        });
+#else
         auto* candidate = new Ssd2683zaColorPanel([this]() {
             return display_ != nullptr && display_->IsPanelBusy();
         });
-        if (!candidate->Init()) {
+#endif
+        bool ok = false;
+        for (int attempt = 1; attempt <= 3 && !ok; ++attempt) {
+            if (attempt > 1) vTaskDelay(pdMS_TO_TICKS(500));
+            ok = candidate->Init();
+            if (!ok) {
+                ESP_LOGW(kTag, "FPC2 color panel init attempt %d failed, retrying",
+                         attempt);
+            }
+        }
+        if (!ok) {
             delete candidate;
-            ESP_LOGW(kTag, "FPC2 SSD2683ZA initialization failed; keeping FPC1 active");
-            // FPC2 挂了也必须起刷新任务：InkSight 内容（尤其是未绑定的配对码）
-            // 会降级显示在 FPC1。没有这个任务设备永远不会去拉 /api/render，
-            // 屏幕上就永远看不到配对码。
+            ESP_LOGW(kTag, "FPC2 color panel initialization failed; keeping FPC1 active");
+            // FPC2 挂了也必须起刷新任务：双屏模式下 RefreshDualScreens 会懒探测
+            // FPC2（见下方 B 屏分支），单屏/未绑定则降级显示在 FPC1。
             if (color_refresh_task_ == nullptr &&
                 xTaskCreate(ColorRefreshTask, "color_refresh", 8192, this, 3,
                             &color_refresh_task_) != pdPASS) {
@@ -243,6 +275,20 @@ private:
                         &color_refresh_task_) != pdPASS) {
             ESP_LOGW(kTag, "Cannot create color refresh task");
         }
+    }
+
+    // 把 BW/RED 两平面送显到 FPC2：3-color(SSD1683 BWR) 直接喂两平面；
+    // 4-color(SSD2683ZA BWRY) 先打包成 2bpp 帧。两驱动接口不同，在此统一。
+    bool ShowColorFrame(const uint8_t* bw, const uint8_t* red) {
+#if FPC2_COLOR_COUNT == 3
+        // SSD1683 RED RAM 约定：1=红、0=非红（与生成端 ConvertJpegToBwrPlanes
+        // 的 "1=红标记" 一致；Waveshare 官方 EPD_4in2bc_Display 亦直接发送
+        // ryimage 不取反）。故三色路径直接送显，无需取反（取反反而整屏泛红）。
+        return color_screen_->ShowFrame(bw, red);
+#else
+        PackInkSightFourColor(bw, red, color_frame_);
+        return color_screen_->ShowFrame(color_frame_);
+#endif
     }
 #endif
 
@@ -481,6 +527,10 @@ private:
         }
         auto cleanup = [this]() { inksight_busy_.store(false); };
         SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+        // 双屏任一屏成功取到图后，据此更新未绑定标志，绑定态会自动清掉残留
+        // 配对码帧；连续失败时保持上一次判定，避免误清。
+        bool device_unbound = inksight_device_unbound_.load();
+        bool any_ok = false;
 
         // A 屏：便签（1bpp BMP → SSD1619）
         if (inksight_frame_ == nullptr) {
@@ -495,8 +545,10 @@ private:
                 static_cast<int>(battery_monitor_.GetBatteryLevel());
             if (InkSightClient::Load(GetNetwork(), inksight_server_, "DUAL_A",
                                      SystemInfo::GetMacAddress(),
-                                     inksight_frame_, error, nullptr,
-                                     battery_pct)) {
+                                     inksight_frame_, error,
+                                     nullptr /* server_refresh_minutes */,
+                                     battery_pct, &device_unbound)) {
+                any_ok = true;
                 display_->RawFrameRefresh(inksight_frame_,
                                           false /* partial 快刷 */);
                 ESP_LOGI(kTag, "双屏 A（便签）已刷新");
@@ -506,6 +558,11 @@ private:
         }
 
         // B 屏：今日课程表（2bpp → SSD2683ZA BWRY）
+        // 上电时 FPC2 偶发探测失败，这里懒探测自愈：只要双屏模式还在，就再试一次
+        // 初始化，成功后续刷新本屏；失败则继续保持单屏（A 屏）运行。
+        if (color_screen_ == nullptr) {
+            InitializeColorScreenAfterNetwork();
+        }
         if (color_screen_ != nullptr && color_screen_->Available()) {
             if (color_bw_ == nullptr) {
                 color_bw_ = static_cast<uint8_t*>(heap_caps_malloc(
@@ -517,25 +574,31 @@ private:
                     Ssd2683zaColorPanel::kWidth / 8 * Ssd2683zaColorPanel::kHeight,
                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
             }
+#if FPC2_COLOR_COUNT == 4
             if (color_frame_ == nullptr) {
                 color_frame_ = static_cast<uint8_t*>(heap_caps_malloc(
                     Ssd2683zaColorPanel::kFrameBytes,
                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
             }
+#endif  // FPC2_COLOR_COUNT == 4
+#if FPC2_COLOR_COUNT == 4
             if (color_bw_ != nullptr && color_red_ != nullptr &&
                 color_frame_ != nullptr) {
+#else
+            if (color_bw_ != nullptr && color_red_ != nullptr) {
+#endif  // FPC2_COLOR_COUNT == 4
                 std::string error;
                 int server_refresh_minutes = 0;
                 if (InkSightClient::Load2bpp(
                         GetNetwork(), inksight_server_, "DUAL_B",
                         SystemInfo::GetMacAddress(), color_bw_, color_red_,
-                        error, &server_refresh_minutes)) {
+                        error, &server_refresh_minutes, &device_unbound)) {
+                    any_ok = true;
                     if (server_refresh_minutes > 0) {
                         Settings writable("inksight", true);
                         writable.SetInt("clr_ref_min", server_refresh_minutes);
                     }
-                    PackInkSightFourColor(color_bw_, color_red_, color_frame_);
-                    if (color_screen_->ShowFrame(color_frame_)) {
+                    if (ShowColorFrame(color_bw_, color_red_)) {
                         ESP_LOGI(kTag, "双屏 B（课程表）已刷新");
                     } else {
                         ESP_LOGW(kTag, "双屏 B 刷屏失败");
@@ -547,13 +610,21 @@ private:
                 ESP_LOGW(kTag, "双屏 B 内存不足");
             }
         }
+        // 双屏任一成功取图后落盘未绑定标志，使绑定设备下次不再卡在配对码帧。
+        if (any_ok) inksight_device_unbound_.store(device_unbound);
+        // 开机跳过首页菜单后，若首次双屏拉取彻底失败（断网/服务器不可达），
+        // 回退显示一次首页菜单，避免白屏；后续失败不再重复全闪。
+        if (!any_ok && !boot_home_fallback_done_.exchange(true)) {
+            ESP_LOGI(kTag, "双屏首刷失败，回退首页菜单（断网/服务器不可达）");
+            display_->ShowBootHome();
+        }
 
         SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
         cleanup();
         EnterIntervalSleepIfPending();
     }
 
-    // FPC2 SSD2683ZA 四色 InkSight：先解包为 BW/RED 平面，再映射为
+    // FPC2 彩色 InkSight：先解包为 BW/RED 平面，再映射/直喂驱动；
     // 控制器的 BWRY 2bpp 码；FPC1 kInkSight 页只显示状态/进度。
     void RefreshInkSightColor(bool initial_full_refresh) {
         if (color_bw_ == nullptr) {
@@ -566,13 +637,19 @@ private:
                 Ssd2683zaColorPanel::kWidth / 8 * Ssd2683zaColorPanel::kHeight,
                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
         }
+#if FPC2_COLOR_COUNT == 4
         if (color_frame_ == nullptr) {
             color_frame_ = static_cast<uint8_t*>(heap_caps_malloc(
                 Ssd2683zaColorPanel::kFrameBytes,
                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
         }
+#endif  // FPC2_COLOR_COUNT == 4
+#if FPC2_COLOR_COUNT == 4
         if (color_bw_ == nullptr || color_red_ == nullptr ||
             color_frame_ == nullptr) {
+#else
+        if (color_bw_ == nullptr || color_red_ == nullptr) {
+#endif  // FPC2_COLOR_COUNT == 4
             display_->dashboard().SetInkSightFooter("内存不足");
             return;
         }
@@ -627,13 +704,11 @@ private:
             cleanup();
             return;
         }
-        PackInkSightFourColor(color_bw_, color_red_, color_frame_);
         display_->dashboard().SetInkSightFooter(
             inksight_device_unbound_.load()
                 ? "InkSight 未绑定：配对码已显示在 FPC2"
                 : "正在刷彩屏，请稍候…");
-        const bool refreshed =
-            color_screen_->ShowFrame(color_frame_);
+        const bool refreshed = ShowColorFrame(color_bw_, color_red_);
         if (inksight_device_unbound_.load()) {
             display_->dashboard().SetInkSightFooter(
                 refreshed ? "InkSight 未绑定：配对码在 FPC2"
@@ -653,7 +728,7 @@ private:
 
     void RefreshAlbumPhoto(const std::string& source, const std::string& name) {
         if (color_screen_ == nullptr || !color_screen_->Available()) {
-            display_->dashboard().SetInkSightFooter("FPC2 SSD2683ZA 四色屏未连接");
+            display_->dashboard().SetInkSightFooter("FPC2 彩色屏未连接");
             return;
         }
         if (color_bw_ == nullptr) {
@@ -666,13 +741,19 @@ private:
                 Ssd2683zaColorPanel::kWidth / 8 * Ssd2683zaColorPanel::kHeight,
                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
         }
+#if FPC2_COLOR_COUNT == 4
         if (color_frame_ == nullptr) {
             color_frame_ = static_cast<uint8_t*>(heap_caps_malloc(
                 Ssd2683zaColorPanel::kFrameBytes,
                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
         }
+#endif  // FPC2_COLOR_COUNT == 4
+#if FPC2_COLOR_COUNT == 4
         if (color_bw_ == nullptr || color_red_ == nullptr ||
             color_frame_ == nullptr) {
+#else
+        if (color_bw_ == nullptr || color_red_ == nullptr) {
+#endif  // FPC2_COLOR_COUNT == 4
             display_->dashboard().SetInkSightFooter("相册图像内存不足");
             return;
         }
@@ -704,8 +785,7 @@ private:
         }
 
         if (ok) {
-            PackInkSightFourColor(color_bw_, color_red_, color_frame_);
-            const bool refreshed = color_screen_->ShowFrame(color_frame_);
+            const bool refreshed = ShowColorFrame(color_bw_, color_red_);
             if (!refreshed) error = "FPC2 刷新失败";
         }
         display_->dashboard().SetInkSightFooter(
@@ -783,7 +863,7 @@ private:
     // initial_full_refresh=true: 首次进入用全刷；false: 按 OK 快刷（局部）。
     void RefreshInkSight(bool initial_full_refresh) {
 #if EPD_ENABLE_COLOR_SCREEN
-        // 双屏模式：InkSight 图像归 FPC2 SSD2683ZA，本函数转发；
+        // 双屏模式：InkSight 图像归 FPC2 彩色屏，本函数转发；
         // FPC1 的 kInkSight 页只显示状态与按键提示。
         if (color_screen_ != nullptr && color_screen_->Available()) {
             RefreshInkSightColor(initial_full_refresh);
@@ -851,6 +931,12 @@ private:
                                   ? friendly
                                   : "连不上服务器(" + friendly + ")";
             display_->dashboard().SetInkSightFooter(tip + " OK再试 · 长按返回");
+            // 开机跳过首页菜单后，首刷若连不上服务器，回退显示一次首页菜单，
+            // 避免白屏（后续失败不再重复全闪；成功上屏后由 RawFrameRefresh 覆盖）。
+            if (!boot_home_fallback_done_.exchange(true)) {
+                ESP_LOGI(kTag, "InkSight 首刷失败，回退首页菜单");
+                display_->ShowBootHome();
+            }
             cleanup();
             return;
         }
@@ -1439,7 +1525,7 @@ private:
 #endif
 #if EPD_ENABLE_COLOR_SCREEN
         mcp.AddTool("self.epaper.refresh_color_screen",
-                    "立即刷新 FPC2 SSD2683ZA 四色屏的 InkSight 模式画面。",
+                    "立即刷新 FPC2 FPC2 彩色屏的 InkSight 模式画面。",
                     PropertyList(),
                     [this](const PropertyList&) -> ReturnValue {
                         display_->dashboard().Show(EpaperDashboard::Page::kInkSight);
@@ -1481,7 +1567,7 @@ private:
                         return std::string("已把 B 屏切换为 ") + name + " 的日 K 图，正在刷新";
                     });
         mcp.AddTool("self.epaper.set_color_refresh_minutes",
-                    "设置 FPC2 SSD2683ZA 四色屏自动刷新间隔（分钟，1~1440；0=关闭自动刷新）。",
+                    "设置 FPC2 FPC2 彩色屏自动刷新间隔（分钟，1~1440；0=关闭自动刷新）。",
                     PropertyList({Property("minutes", kPropertyTypeInteger, 0, 1440)}),
                     [this](const PropertyList& properties) -> ReturnValue {
                         const int minutes =
@@ -1493,17 +1579,23 @@ private:
                         return true;
                     });
         mcp.AddTool("self.epaper.screen_status",
-                    "查看双屏配置与状态（FPC1 SSD1619、FPC2 SSD2683ZA、InkSight 服务器与模式）。",
+                    "查看双屏配置与状态（FPC1 SSD1619、FPC2 彩色屏、InkSight 服务器与模式）。",
                     PropertyList(),
                     [this](const PropertyList&) -> ReturnValue {
                         std::string status = "bw_screen(fast):ok";
 #if EPD_ENABLE_COLOR_SCREEN
+                        const char* fpc2_key =
+#if FPC2_COLOR_COUNT == 3
+                            "FPC2_UC1679_BWR";
+#else
+                            "FPC2_SSD2683ZA_BWRY";
+#endif
                         status += color_screen_ != nullptr &&
                                           color_screen_->Available()
-                                      ? "; FPC2_SSD2683ZA_BWRY:ok"
-                                      : "; FPC2_SSD2683ZA_BWRY:not_detected";
+                                      ? std::string("; ") + fpc2_key + ":ok"
+                                      : std::string("; ") + fpc2_key + ":not_detected";
 #else
-                        status += "; FPC2_SSD2683ZA_BWRY:disabled";
+                        status += "; FPC2_COLOR_DISABLED:disabled";
 #endif
                         status += "; server=" + inksight_server_;
                         Settings s("inksight", false);
@@ -1518,7 +1610,7 @@ private:
                     [this](const PropertyList& p) -> ReturnValue {
                         return storage_.List(p["category"].value<std::string>());
                     });
-        mcp.AddTool("self.epaper.show_sd_image", "在 FPC2 SSD2683ZA 四色屏显示 TF 卡 /xiaozhi/images 中的 JPG/JPEG 图片。",
+        mcp.AddTool("self.epaper.show_sd_image", "在 FPC2 FPC2 彩色屏显示 TF 卡 /xiaozhi/images 中的 JPG/JPEG 图片。",
                     PropertyList({Property("name", kPropertyTypeString)}),
                     [this](const PropertyList& p) -> ReturnValue {
                         const std::string name = p["name"].value<std::string>();
@@ -1531,7 +1623,7 @@ private:
 #endif
                     });
         mcp.AddTool("self.epaper.show_backend_album",
-                    "从 InkSight 后台 MY_ADAPTIVE Photo Frame 读取图片并显示到 FPC2 SSD2683ZA 四色屏。",
+                    "从 InkSight 后台 MY_ADAPTIVE Photo Frame 读取图片并显示到 FPC2 FPC2 彩色屏。",
                     PropertyList(),
                     [this](const PropertyList&) -> ReturnValue {
 #if EPD_ENABLE_COLOR_SCREEN
@@ -1628,6 +1720,14 @@ public:
             }
         } else {
             ESP_LOGI(kTag, "InkSight server (NVS): %s", inksight_server_.c_str());
+        }
+        // 已配置 InkSight/双屏：开机直接等网络图，跳过首页菜单（避免双闪）。
+        // 首刷若拿不到图（断网），ColorRefreshTask 会兜底回退首页，避免白屏。
+        const bool boot_to_inksight = !inksight_server_.empty();
+        if (!boot_to_inksight) {
+            display_->ShowBootHome();
+        } else {
+            ESP_LOGI(kTag, "已配置 InkSight/双屏：开机跳过首页菜单，直接等网络图");
         }
         display_->dashboard().SetInkSightShow(
             [this](bool initial_full) {

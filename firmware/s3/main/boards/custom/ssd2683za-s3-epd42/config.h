@@ -68,7 +68,8 @@
 // 双排座（docs/eda/Netlist_schematic_main_1_2026-09-15.net）：
 //   两个 24pin 座共享 DIN/CLK/DC/RST，CS 与 BUSY 独立：
 //     FPC1: CS2=GPIO39, BUSY2=GPIO40  -> 黑白快刷屏 SSD1619（对话信息屏）
-//     FPC2: CS1=GPIO9,  BUSY1=GPIO12  -> 四色屏 SSD2683ZA（相册/InkSight 图像）
+//     FPC2: CS1=GPIO9,  BUSY1=GPIO12  -> 彩色屏（menuconfig 选 3-color SSD1683
+//                                      BWR 或 4-color SSD2683ZA BWRY；相册/InkSight）
 //   每路座子各配独立 GDR/RESE 升压泵（面板驱动芯片自管理，无需 MCU 控制）。
 // GPIO6/8/9/10/11/12 and the PA control on GPIO38 are available GPIOs on
 // this ESP32-S3R8 board configuration.
@@ -82,7 +83,8 @@
 #define EPD_CS_PIN    GPIO_NUM_39
 #define EPD_BUSY_PIN  GPIO_NUM_40
 
-// ---- FPC2：四色屏 SSD2683ZA（相册/InkSight，黑白黄红）----
+// ---- FPC2：彩色图像屏（menuconfig 选 3-color SSD1683 BWR 或 4-color SSD2683ZA
+//      BWRY；相册 / InkSight，驱动随 FPC2_PANEL_COLORS 切换）----
 #define EPD_COLOR_CS_PIN   GPIO_NUM_9
 #define EPD_COLOR_BUSY_PIN GPIO_NUM_12
 
@@ -119,7 +121,7 @@
 
 // ---- 双屏面板尺寸（menuconfig 可选 4.2" / 5.83"，FPC1 与 FPC2 独立）----
 // FPC1：黑白快刷信息屏 SSD1619（主屏，对话 + 学习）；
-// FPC2：彩色图像屏 SSD2683ZA（相册 / InkSight）。
+// FPC2：彩色图像屏（menuconfig 选 3-color SSD1683 / 4-color SSD2683ZA；相册 / InkSight）。
 #if defined(CONFIG_FPC1_PANEL_583)
 #define FPC1_WIDTH  648
 #define FPC1_HEIGHT 480
@@ -163,21 +165,21 @@
 //   3) 兜底：生产环境单一域名 INKSIGHT_PRODUCTION_SERVER_URL。
 // 换办公点 / 内网 IP 漂移时，只要候选列表覆盖对应网段且设备与后端 PC 处于
 // 同一局域网，设备即自动连上，不必每次改 NVS。新增办公点只需在候选列表追加。
-// 注意：本机后端当前监听 8104（run_backend.bat 启动 xiaowu_platform.main:app --reload）；
-// 8092 为历史端口，仅在旧后端仍运行时作为兜底。候选列表把当前实际端口放前面，
-// 避免设备每次联网都先去连一个已停用的 8092 而刷一排连接失败日志。
+// 注意：本机后端当前监听 8092（run_backend.bat 启动 xiaowu_platform.main:app）；
+// 8104 为历史端口（旧 dual 控制台），仅作兜底。候选列表把当前实际端口放前面，
+// 避免设备每次联网都先去连一个已停用的 8104 而刷一排连接失败日志。
 // ---------------------------------------------------------------------------
 #ifndef INKSIGHT_DEFAULT_SERVER_URL
-#  define INKSIGHT_DEFAULT_SERVER_URL  "http://192.168.1.4:8104"
+#  define INKSIGHT_DEFAULT_SERVER_URL  "http://192.168.1.4:8092"
 #endif
 
 // 各办公点内网后端候选（IP:端口，逗号分隔）。设备联网后逐个探测 /health，
-// 首个返回 2xx 的即作为后端。当前端口 8104 前置，8092 仅作兜底以兼容旧后端。
+// 首个返回 2xx 的即作为后端。当前端口 8092 前置，8104 仅作兜底以兼容旧后端。
 // 换办公点时把该办公点"电脑 LAN IP:端口"加进来即可。
 #ifndef INKSIGHT_SERVER_CANDIDATES
 #  define INKSIGHT_SERVER_CANDIDATES                                       \
-    "http://192.168.1.4:8104,http://192.168.1.4:8092,"                    \
-    "http://192.168.101.69:8104,http://192.168.101.69:8092"
+    "http://192.168.1.4:8092,http://192.168.1.4:8104,"                    \
+    "http://192.168.101.69:8092,http://192.168.101.69:8104"
 #endif
 
 // 生产环境单一域名（正式出货 / 非测试环境最终落点，单域名）。

@@ -21,11 +21,17 @@ from __future__ import annotations
 import io
 import logging
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
 from PIL import Image, ImageDraw, ImageFont
+from . import data_api
+from .settings import settings
+from .store import Store
+
+store = Store(settings.database_path)
 
 logger = logging.getLogger(__name__)
 
@@ -758,6 +764,8 @@ def _render_dual_screen_inner(mac: str, screen: str, w: int, h: int, colors: int
             scene_cfg = (cfg_root.get("config") or {}).get(scene_key) or {}
             a_cfg = scene_cfg.get("a") or {}
             mode = str(a_cfg.get("mode") or "notes")
+            if mode == "published-app":
+                return _render_published_app(a_cfg, w, h, colors, screen="A")
             photos = _album_photos(dual_config)
             if scene_key == "family" and mode.startswith("family"):
                 content = cfg_root.get("content") or {}
@@ -843,6 +851,8 @@ def _render_dual_screen_inner(mac: str, screen: str, w: int, h: int, colors: int
         scene_cfg = (cfg_root.get("config") or {}).get(scene_key) or {}
         b_cfg = scene_cfg.get("b") or {}
         b_mode = str(b_cfg.get("mode") or ("course" if scene_key == "study" else "family" if scene_key == "family" else "health-plan" if scene_key == "health" else "finance-trend" if scene_key == "finance" else "office"))
+        if b_mode == "published-app":
+            return _render_published_app(b_cfg, w, h, colors, screen="B")
         if b_mode == "album":
             return render_album(mac, w, h, colors, dual_config)
         if scene_key == "family" and b_mode in ("calendar", "family"):
@@ -880,6 +890,227 @@ def _render_dual_screen_inner(mac: str, screen: str, w: int, h: int, colors: int
         draw.text((int(14 * scale), int(70 * scale)),
                   "课程表/便签渲染失败", fill=0, font=_load_cjk(max(13, int(16 * scale))))
         return img
+
+
+def _wrap_text(draw: ImageDraw.ImageDraw, text: str, font, max_w: int) -> list[str]:
+    """按像素宽度换行，支持显式换行符。"""
+    lines: list[str] = []
+    for paragraph in str(text).split("\n"):
+        cur = ""
+        for ch in paragraph:
+            test = cur + ch
+            if _text_w(draw, test, font) > max_w and cur:
+                lines.append(cur)
+                cur = ch
+            else:
+                cur = test
+        lines.append(cur)
+    return lines
+
+
+# ── 轨2：数据接口卡片（ISV 端点实时取数，后端渲染成 e-ink 卡片）──────────
+_DATA_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
+_DATA_TTL = 60.0
+
+
+def _fetch_live_data(app_id: str, endpoint: str, token: str, screen: str) -> Optional[dict]:
+    """带 60s 内存缓存的实时取数；成功时顺手回写样本，失败返回 None。"""
+    key = (app_id, "B" if str(screen).upper() == "B" else "A")
+    now = time.time()
+    cached = _DATA_CACHE.get(key)
+    if cached and now - cached[0] < _DATA_TTL:
+        return cached[1]
+    try:
+        payload = data_api.fetch_card(endpoint, token, screen)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[DATA-API] %s 取数失败：%s", app_id, exc)
+        return None
+    normalized = data_api.normalize_card(payload)
+    _DATA_CACHE[key] = (now, normalized)
+    try:
+        store.update_data_source_sample(app_id, normalized)
+    except Exception:  # noqa: BLE001
+        pass
+    return normalized
+
+
+def _resolve_data_payload(app_id: str, ds: dict, screen: str) -> Optional[dict]:
+    """实时优先、样本兜底；两者皆无则返回 None（上层回落海报卡）。"""
+    endpoint = str(ds.get("endpoint") or "").strip()
+    if endpoint:
+        live = _fetch_live_data(app_id, endpoint, str(ds.get("token") or ""), screen)
+        if live:
+            return live
+    sample = ds.get("sample")
+    if isinstance(sample, dict) and (sample.get("title") or sample.get("items")):
+        return data_api.normalize_card(sample)
+    return None
+
+
+def _render_data_card(payload: dict, w: int, h: int, colors: int) -> Image.Image:
+    """按数据接口契约渲染一张 e-ink 卡片：标题/副标题/键值项/进度条/页脚/二维码。"""
+    scale = w / 400.0
+    is_color = colors >= 3
+    if is_color:
+        img = _palette_p_image(w, h, colors)
+        fg, red, yellow = 0, 3, 2
+    else:
+        img = Image.new("1", (w, h), 1)
+        fg = red = yellow = 0
+    draw = ImageDraw.Draw(img)
+    margin = int(16 * scale)
+
+    title = payload.get("title") or "数据卡片"
+    subtitle = payload.get("subtitle") or ""
+    items = payload.get("items") or []
+    footer = payload.get("footer") or ""
+    qr = payload.get("qr") or ""
+
+    font_title = _load_cjk(max(18, int(22 * scale)), bold=True)
+    font_sub = _load_cjk(max(11, int(13 * scale)))
+    font_label = _load_cjk(max(12, int(15 * scale)))
+    font_value = _load_cjk(max(12, int(15 * scale)), bold=True)
+    font_footer = _load_cjk(max(10, int(12 * scale)))
+
+    y = int(12 * scale)
+    draw.text((margin, y), _ellipsis_text(draw, title, font_title, w - 2 * margin - int(64 * scale)),
+              fill=fg, font=font_title)
+    hy = y + int(font_title.size * 1.28)
+    if subtitle:
+        draw.text((margin, hy), _ellipsis_text(draw, subtitle, font_sub, w - 2 * margin), fill=fg, font=font_sub)
+        hy += int(font_sub.size * 1.4)
+    draw.line([(margin, hy), (w - margin, hy)], fill=fg, width=max(1, int(1.5 * scale)))
+    body_top = hy + int(10 * scale)
+
+    footer_h = int(20 * scale) if footer else 0
+    qr_size = int(60 * scale) if qr else 0
+    body_bottom = h - margin - footer_h - (qr_size + int(6 * scale) if qr_size else 0)
+    count = max(1, len(items))
+    row_h = max(int(24 * scale), (body_bottom - body_top) // count)
+
+    for i, item in enumerate(items):
+        ry = body_top + i * row_h
+        label = str(item.get("label") or "")
+        value = str(item.get("value") or "")
+        emphasis = str(item.get("emphasis") or "none")
+        vcolor = fg
+        if emphasis == "red" and is_color:
+            vcolor = red
+        elif emphasis == "yellow" and colors >= 4:
+            vcolor = yellow
+        draw.text((margin, ry), _ellipsis_text(draw, label, font_label, int(w * 0.5)), fill=fg, font=font_label)
+        vw = _text_w(draw, value, font_value)
+        draw.text((w - margin - vw, ry), value, fill=vcolor, font=font_value)
+        prog = item.get("progress")
+        if prog is not None:
+            bar_y = ry + int(font_label.size * 1.5)
+            bh = max(3, int(5 * scale))
+            draw.rectangle([margin, bar_y, w - margin, bar_y + bh], outline=fg, width=1)
+            fill_w = int((w - 2 * margin) * max(0, min(100, int(prog))) / 100)
+            if fill_w > 0:
+                draw.rectangle([margin, bar_y, margin + fill_w, bar_y + bh], fill=vcolor)
+        elif i < len(items) - 1:
+            sy = ry + row_h - int(4 * scale)
+            draw.line([(margin, sy), (w - margin, sy)], fill=fg, width=1)
+
+    if footer:
+        draw.text((margin, h - margin - int(font_footer.size * 1.15)),
+                  _ellipsis_text(draw, footer, font_footer,
+                                 w - 2 * margin - (qr_size + int(8 * scale) if qr_size else 0)),
+                  fill=fg, font=font_footer)
+    if qr and str(qr).lower().startswith(("http://", "https://")):
+        try:
+            import qrcode  # 可选依赖：未安装时跳过
+            ql = qrcode.QRCode(box_size=2, border=1, error_correction=qrcode.constants.ERROR_CORRECT_M)
+            ql.add_data(qr)
+            ql.make(fit=True)
+            qimg = ql.make_image(fill_color="black", back_color="white").convert("L")
+            qimg = qimg.resize((qr_size, qr_size)).point(lambda p: 255 if p > 128 else 0)
+            img.paste(qimg, (w - margin - qr_size, h - margin - qr_size), qimg)
+        except Exception:  # noqa: BLE001
+            pass
+    return img
+
+
+def _render_published_app(cfg: dict, w: int, h: int, colors: int, screen: str = "A") -> Image.Image:
+    """开发者已上线应用：服务端出图（黑白 / 彩色自适应）。
+
+    - 若该应用配置了「数据接口」（轨2），优先实时取数并渲染数据卡片；失败时用样本兜底。
+    - 否则渲染海报卡：应用名 + 场景标签 + 简介 + 入口地址；入口为绝对地址时附二维码，
+      便于手机扫码打开完整交互应用；相对地址（如 /sandbox/...）则直接显示路径。
+    """
+    scale = w / 400.0
+    is_color = colors >= 3
+    if is_color:
+        img = _palette_p_image(w, h, colors)
+        fg = 0
+        accent = 3  # 红
+    else:
+        img = Image.new("1", (w, h), 1)
+        fg = 0
+        accent = 0
+    draw = ImageDraw.Draw(img)
+    margin = int(16 * scale)
+
+    app_id = cfg.get("appId") or ""
+    app = None
+    if app_id:
+        try:
+            app = store.get_published_app(app_id)
+        except Exception:  # noqa: BLE001
+            app = None
+
+    # 轨2：应用配置了数据接口 → 实时取数渲染数据卡片（失败用样本兜底）
+    if app_id:
+        try:
+            ds = store.get_app_data_source(app_id)
+        except Exception:  # noqa: BLE001
+            ds = None
+        if ds:
+            payload = _resolve_data_payload(app_id, ds, screen)
+            if payload:
+                return _render_data_card(payload, w, h, colors)
+
+    name = cfg.get("title") or (app["name"] if app else "已上线应用")
+    scene = app["scene"] if app else (cfg.get("scene") or cfg.get("source") or "")
+    desc = (app.get("description") or "") if app else (cfg.get("description") or "")
+    preview_url = (app.get("preview_url") or "") if app else (cfg.get("source") or "")
+
+    font_title = _load_cjk(max(18, int(26 * scale)), bold=True)
+    font_meta = _load_cjk(max(12, int(15 * scale)))
+    font_body = _load_cjk(max(12, int(15 * scale)))
+
+    title_y = int(16 * scale)
+    draw.text((margin, title_y), _ellipsis_text(draw, name, font_title, w - 2 * margin), fill=fg, font=font_title)
+
+    tag_y = title_y + int(font_title.size * 1.35)
+    if scene:
+        draw.text((margin, tag_y), f"#{scene}", fill=accent, font=font_meta)
+
+    body_y = tag_y + int(font_meta.size * 1.7)
+    if desc:
+        for i, ln in enumerate(_wrap_text(draw, desc, font_body, w - 2 * margin)[:5]):
+            draw.text((margin, body_y + i * int(font_body.size * 1.4)), ln, fill=fg, font=font_body)
+
+    footer_y = h - int(44 * scale)
+    if preview_url and str(preview_url).lower().startswith("http"):
+        try:
+            import qrcode  # 可选依赖：未安装时降级为文字
+            qr_l = qrcode.QRCode(box_size=2, border=1, error_correction=qrcode.constants.ERROR_CORRECT_M)
+            qr_l.add_data(preview_url)
+            qr_l.make(fit=True)
+            qr_img = qr_l.make_image(fill_color="black", back_color="white").convert("L")
+            qsize = int(64 * scale)
+            qr_img = qr_img.resize((qsize, qsize)).point(lambda p: 255 if p > 128 else 0)
+            qr_x = w - margin - qsize
+            draw.text((margin, footer_y - int(6 * scale)), "手机扫码打开", fill=fg, font=font_meta)
+            img.paste(qr_img, (qr_x, int(footer_y - 12 * scale)), qr_img)
+        except Exception:  # noqa: BLE001
+            draw.text((margin, footer_y), _ellipsis_text(draw, f"打开：{preview_url}", font_meta, w - 2 * margin), fill=fg, font=font_meta)
+    else:
+        label = "开发者已上线应用" if not preview_url else f"入口：{preview_url}"
+        draw.text((margin, footer_y), _ellipsis_text(draw, label, font_meta, w - 2 * margin), fill=fg, font=font_meta)
+    return img
 
 
 def render_dual_screen(mac: str, screen: str, w: int, h: int, colors: int,

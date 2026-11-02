@@ -1,15 +1,17 @@
+import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Response, status
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from pydantic import BaseModel
 
-from . import sandbox
+from . import data_api, isv_spec, sandbox
 from .models import (AdminLogin, ContentConfigIn, ContentPush, DeveloperAppCreate, DeveloperLogin,
-                     DeveloperRegister, DeviceCapabilities, DeviceEvent, DeviceRegister,
-                     GithubImportIn, Heartbeat, MobileContentPush, ModelConfigUpsert, PasswordLogin,
-                     ReviewDecision, ReviewSubmit, SandboxAppCreate, TaskAck,
+                     DataSourceIn, DeveloperRegister, DeviceCapabilities, DeviceEvent, DeviceRegister,
+                     GithubImportIn, Heartbeat, MobileContentPush, ModelConfigUpsert, PairingConfirmIn,
+                     PairingStartIn, PasswordLogin, ReviewDecision, ReviewSubmit, SandboxAppCreate, TaskAck,
                      TemplateUpsert, WebhookCreate)
 from .connector_api import router as connector_router
 from .connectors import ConnectorRegistry, CredentialVault
@@ -62,8 +64,13 @@ def require_device(device_id: str, x_device_token: Annotated[str | None, Header(
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid device token")
 
 
-def current_user(x_user_token: Annotated[str | None, Header()] = None) -> str:
-    user_id = store.session_user(x_user_token or "")
+def current_user(x_user_token: Annotated[str | None, Header()] = None,
+                 authorization: Annotated[str | None, Header()] = None) -> str:
+    """用户会话：兼容 X-User-Token 与 Authorization: Bearer（前者给固件/小程序，后者给内容后台）。"""
+    token = (x_user_token or "").strip()
+    if not token and authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+    user_id = store.session_user(token)
     if not user_id:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid user token")
     return user_id
@@ -176,9 +183,105 @@ def device_event(device_id: str, body: DeviceEvent, _: None = Depends(require_de
     return {"event_id": event_id, "status": "accepted"}
 
 
+# ── 确权层（pairing）：ISV 申请一次性绑定码，用户在自己的后台显性点击「允许」──────────
+# 设计要点：ISV 全程不接触用户账号与大模型凭证；平台只落一条 app↔device↔user 授权记录。
+SCOPE_TEXT = {
+    "device.content.write": "向你的设备推送内容",
+    "device.read": "读取设备型号与状态",
+}
+
+
+# 对外 API 规范（公开、免鉴权）：开发者可在后台在线查看，也可直接下载喂给代码生成器/LLM。
+@app.get("/openapi/isv.json", include_in_schema=False)
+def isv_openapi_json(download: bool = False) -> Response:
+    payload = json.dumps(isv_spec.build_spec(), ensure_ascii=False, indent=2)
+    headers = ({"Content-Disposition": 'attachment; filename="xiaowu-isv-openapi.json"'}
+               if download else {"Cache-Control": "no-cache"})
+    return Response(content=payload, media_type="application/json; charset=utf-8", headers=headers)
+
+
+@app.get("/openapi/isv.yaml", include_in_schema=False)
+def isv_openapi_yaml(download: bool = False) -> Response:
+    try:
+        import yaml
+    except ImportError:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "yaml renderer unavailable")
+
+    class Dumper(yaml.SafeDumper):
+        pass
+
+    def represent_str(dumper, data):  # 多行文本用 | 块，避免 \n 转义成一行看不懂
+        style = "|" if "\n" in data else None
+        return dumper.represent_scalar("tag:yaml.org,2002:str", data, style=style)
+
+    Dumper.add_representer(str, represent_str)
+    payload = yaml.dump(isv_spec.build_spec(), Dumper=Dumper, allow_unicode=True,
+                        sort_keys=False, width=120, default_flow_style=False)
+    headers = ({"Content-Disposition": 'attachment; filename="xiaowu-isv-openapi.yaml"'}
+               if download else {"Cache-Control": "no-cache"})
+    return Response(content=payload, media_type="application/yaml; charset=utf-8", headers=headers)
+
+
+@app.get("/openapi/isv.md", include_in_schema=False)
+def isv_openapi_md(download: bool = False) -> Response:
+    payload = isv_spec.to_markdown()
+    headers = ({"Content-Disposition": 'attachment; filename="xiaowu-isv-api.md"'}
+               if download else {"Cache-Control": "no-cache"})
+    return Response(content=payload, media_type="text/markdown; charset=utf-8", headers=headers)
+
+
+@app.post("/openapi/v1/pairing/start", status_code=201)
+def pairing_start(body: PairingStartIn, app_info: dict = Depends(current_app)) -> dict:
+    """ISV 申请一次性绑定码（默认 10 分钟有效）。
+
+    display_code 由 ISV 展示给用户；用户在「小悟后台 → 授权管理」输入并显性确认后，
+    ISV 再轮询 GET /openapi/v1/pairing/{code} 拿到 device_id 才能推送。
+    """
+    require_scope(app_info, "device.content.write")
+    label = (body.label or app_info["name"])[:40]
+    result = store.create_pairing_code(app_info["app_id"], "", label, body.scopes)
+    return {
+        "code": result["code"],
+        "display_code": result["display_code"],
+        "expires_in": result["expires_in"],
+        "expires_at": result["expires_at"],
+        "confirm_path": f"/pair?code={result['code']}",
+        "confirm_hint": "请让用户登录小悟后台并打开『授权管理』，输入上方绑定码确认",
+        "label": label,
+        "scopes": body.scopes,
+    }
+
+
+@app.get("/openapi/v1/pairing/{code}")
+def pairing_status(code: str, app_info: dict = Depends(current_app)) -> dict:
+    """ISV 轮询绑定结果（pending/approved/denied/expired）。
+
+    码必须属于当前应用，防止用别的应用的码窥探设备。
+    """
+    item = store.get_pairing_code(code)
+    if not item or item["app_id"] != app_info["app_id"]:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "pairing code not found")
+    approved = item["status"] == "approved"
+    return {
+        "code": item["code"],
+        "status": item["status"],
+        "device_id": item["device_id"] if approved else None,
+        "grant_id": item["grant_id"] if approved else None,
+        "expires_at": item["expires_at"],
+    }
+
+
 @app.post("/openapi/v1/devices/{device_id}/content", status_code=202)
 def push_content(device_id: str, body: ContentPush, app_info: dict = Depends(current_app)) -> dict[str, str]:
     require_scope(app_info, "device.content.write")
+    # 确权门禁：必须是用户显性授权过的设备，禁止凭 app key 向任意设备推送。
+    grant = store.get_active_grant(app_info["app_id"], device_id)
+    if not grant:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, {
+            "error": "pairing_required",
+            "message": "该设备尚未授权给此应用。请先调用 POST /openapi/v1/pairing/start，"
+                       "让用户在『授权管理』输入绑定码确认后再推送。",
+        })
     template = store.template(body.template)
     if not template:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "unknown or disabled template")
@@ -189,6 +292,7 @@ def push_content(device_id: str, body: ContentPush, app_info: dict = Depends(cur
                                 source="openapi", created_by=app_info["app_id"])
     if task_id is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "device not found")
+    store.touch_grant_push(grant["grant_id"])
     return {"task_id": task_id, "status": "queued"}
 
 
@@ -263,6 +367,24 @@ def developer_hardware() -> dict:
     }
 
 
+def _attach_track(apps: list[dict]) -> list[dict]:
+    """给应用列表补 track（static / data / none）与数据接口概要，供前端展示提交轨。"""
+    for item in apps:
+        ds = store.get_app_data_source(item["app_id"])
+        if ds:
+            item["track"] = "data"
+            item["data_source"] = {
+                "endpoint": ds.get("endpoint") or "",
+                "verdict": ds.get("verdict") or "fail",
+                "last_error": ds.get("last_error") or "",
+                "checked_at": ds.get("checked_at") or "",
+                "has_token": bool(ds.get("token")),
+            }
+        else:
+            item["track"] = "static" if store.get_sandbox_build(item["app_id"]) else "none"
+    return apps
+
+
 @app.get("/developer/v1/apps")
 def developer_apps(developer: dict = Depends(current_developer)) -> list[dict]:
     apps = store.list_sandbox_apps(developer["developer_id"])
@@ -274,7 +396,7 @@ def developer_apps(developer: dict = Depends(current_developer)) -> list[dict]:
             "imported_at": build["imported_at"], "preview_url": f"/sandbox/{item['app_id']}/",
             "report": build["report"],
         }
-    return apps
+    return _attach_track(apps)
 
 
 @app.post("/developer/v1/apps", status_code=201)
@@ -357,14 +479,135 @@ def sandbox_static(app_id: str, file_path: str = ""):
     return FileResponse(target, headers={"Cache-Control": "no-cache"})
 
 
+@app.post("/developer/v1/apps/{app_id}/data-source")
+def developer_save_data_source(app_id: str, body: DataSourceIn,
+                               developer: dict = Depends(current_developer)) -> dict:
+    """保存并校验「数据接口」（轨2）：实时抓取 ISV 端点，失败时用开发者提供的样本兜底。"""
+    app_info = store.sandbox_app(app_id, developer["developer_id"])
+    if not app_info:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "应用不存在")
+    if app_info["status"] == "in_review":
+        raise HTTPException(status.HTTP_409_CONFLICT, "应用正在审核中，暂不可修改数据接口")
+    endpoint = body.endpoint.strip()
+    token = body.token.strip()
+    payload = None
+    last_error = ""
+    try:
+        payload = data_api.fetch_card(endpoint, token, "A")
+    except data_api.DataApiError as exc:
+        last_error = str(exc)
+        payload = body.sample
+    if payload is None:
+        base = data_api.validate_card({})
+        checks = [{"id": "endpoint", "label": "端点可访问", "status": "fail",
+                   "detail": last_error or "未取到数据：请检查端点地址与鉴权"}] + base["checks"]
+        normalized: dict = {}
+    else:
+        base = data_api.validate_card(payload)
+        checks = base["checks"]
+        normalized = base["normalized"]
+        if last_error:
+            checks = [{"id": "endpoint", "label": "端点可访问", "status": "warn",
+                       "detail": f"实时取数失败（{last_error}），已用样本校验；上线前请确保端点可访问"}] + checks
+    failed = [c for c in checks if c["status"] == "fail"]
+    warned = [c for c in checks if c["status"] == "warn"]
+    verdict = "fail" if failed else ("warn" if warned else "pass")
+    summary = {"pass": sum(1 for c in checks if c["status"] == "pass"),
+               "warn": len(warned), "fail": len(failed)}
+    sample_to_save = normalized if (verdict != "fail" and normalized) else None
+    store.save_app_data_source(app_id, endpoint, token, verdict, checks, sample_to_save, last_error)
+    store.audit(developer["developer_id"], "sandbox_app.data_source", app_id, {"verdict": verdict})
+    return {"app_id": app_id, "verdict": verdict, "checks": checks, "summary": summary,
+            "sample": normalized}
+
+
+@app.get("/developer/v1/apps/{app_id}/data-source")
+def developer_get_data_source(app_id: str, developer: dict = Depends(current_developer)) -> dict:
+    if not store.sandbox_app(app_id, developer["developer_id"]):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "应用不存在")
+    ds = store.get_app_data_source(app_id)
+    if not ds:
+        return {"app_id": app_id, "configured": False}
+    return {"app_id": app_id, "configured": True, "endpoint": ds.get("endpoint") or "",
+            "has_token": bool(ds.get("token")), "verdict": ds.get("verdict") or "fail",
+            "checks": ds.get("checks") or [], "sample": ds.get("sample") or {},
+            "checked_at": ds.get("checked_at") or "", "last_error": ds.get("last_error") or ""}
+
+
+# ── 接入凭证与确权联调（开发者自助，session 鉴权，免把 App Key 填进浏览器）──────────────
+@app.post("/developer/v1/apps/{app_id}/credential", status_code=201)
+def developer_issue_credential(app_id: str, developer: dict = Depends(current_developer)) -> dict:
+    """为应用签发（或轮换）OpenAPI 凭证，app_id 与内容应用保持一致，确权/推送共用。"""
+    app_info = store.sandbox_app(app_id, developer["developer_id"])
+    if not app_info:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "应用不存在")
+    result = store.issue_app_credential(app_id, app_info["name"])
+    store.audit(developer["developer_id"], "app.credential.issue", app_id, {"scopes": result["scopes"]})
+    return result
+
+
+@app.get("/developer/v1/apps/{app_id}/credential")
+def developer_get_credential(app_id: str, developer: dict = Depends(current_developer)) -> dict:
+    if not store.sandbox_app(app_id, developer["developer_id"]):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "应用不存在")
+    app = store.app_public(app_id)
+    return {
+        "issued": bool(app and app.get("status") == "active"),
+        "app_id": app_id,
+        "scopes": (app or {}).get("scopes", []),
+        "created_at": (app or {}).get("created_at"),
+    }
+
+
+@app.post("/developer/v1/apps/{app_id}/pairing/start", status_code=201)
+def developer_pairing_start(app_id: str, body: PairingStartIn,
+                            developer: dict = Depends(current_developer)) -> dict:
+    """开发者后台「绑定测试」：用会话直接签发绑定码，自测确权闭环，无需在浏览器里放 App Key。"""
+    app_info = store.sandbox_app(app_id, developer["developer_id"])
+    if not app_info:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "应用不存在")
+    if not store.app_public(app_id):
+        raise HTTPException(status.HTTP_409_CONFLICT, "请先签发接入凭证（App Token），否则应用无法在设备端生效")
+    label = (body.label or app_info["name"])[:40]
+    result = store.create_pairing_code(app_id, developer["developer_id"], label, body.scopes)
+    return {**result, "app_name": app_info["name"], "label": label, "scopes": body.scopes,
+            "confirm_path": f"/pair?code={result['code']}"}
+
+
+@app.get("/developer/v1/apps/{app_id}/pairing/{code}")
+def developer_pairing_status(app_id: str, code: str,
+                             developer: dict = Depends(current_developer)) -> dict:
+    if not store.sandbox_app(app_id, developer["developer_id"]):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "应用不存在")
+    item = store.get_pairing_code(code)
+    if not item or item["app_id"] != app_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "绑定码不存在")
+    approved = item["status"] == "approved"
+    return {"code": item["code"], "status": item["status"],
+            "device_id": item["device_id"] if approved else None,
+            "grant_id": item["grant_id"] if approved else None,
+            "expires_at": item["expires_at"]}
+
+
 @app.post("/developer/v1/apps/{app_id}/submit", status_code=202)
 def developer_submit(app_id: str, body: ReviewSubmit, developer: dict = Depends(current_developer)) -> dict:
     build = store.get_sandbox_build(app_id)
-    report = (build or {}).get("report") or {}
-    if report.get("verdict") == "fail":
-        blocking = [c["label"] for c in report.get("checks", []) if c.get("status") == "fail"]
-        raise HTTPException(status.HTTP_409_CONFLICT,
-                            "沙箱工程未通过墨水屏适配规则：" + "；".join(blocking) + "。请修正后重新导入再提交")
+    ds = store.get_app_data_source(app_id)
+    if ds:
+        if (ds.get("verdict") or "fail") == "fail":
+            blocking = [c["label"] for c in (ds.get("checks") or []) if c.get("status") == "fail"]
+            raise HTTPException(status.HTTP_409_CONFLICT,
+                                "数据接口未通过校验：" + "；".join(blocking or ["请重新校验端点"])
+                                + "。请修正后重新校验再提交")
+    else:
+        if not build:
+            raise HTTPException(status.HTTP_409_CONFLICT,
+                                "提交前需先完成「双屏适配UI（静态网页）」或「数据接口」其中之一")
+        report = build.get("report") or {}
+        if report.get("verdict") == "fail":
+            blocking = [c["label"] for c in report.get("checks", []) if c.get("status") == "fail"]
+            raise HTTPException(status.HTTP_409_CONFLICT,
+                                "沙箱工程未通过墨水屏适配规则：" + "；".join(blocking) + "。请修正后重新导入再提交")
     if not store.submit_sandbox_app(app_id, developer["developer_id"], body.version, body.notes):
         raise HTTPException(status.HTTP_409_CONFLICT, "仅沙箱或已驳回应用可提交审核")
     store.audit(developer["developer_id"], "sandbox_app.submit", app_id, {"version": body.version})
@@ -392,6 +635,69 @@ def mobile_scenes(locale: str = "zh-CN", _: str = Depends(current_user)) -> list
 @app.get("/api/v1/mobile/devices")
 def mobile_devices(user_id: str = Depends(current_user)) -> list[dict]:
     return store.user_devices(user_id)
+
+
+# 用户侧确权：绑定码必须由已登录用户本人显性确认（点「允许 / 拒绝」），
+# 平台据此建立 app↔device↔user 三元授权；用户随时可在同一入口撤销。
+@app.get("/api/v1/mobile/pairing/{code}")
+def mobile_pairing_preview(code: str, user_id: str = Depends(current_user)) -> dict:
+    item = store.get_pairing_code(code)
+    if not item:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "binding code not found")
+    app = store.app_public(item["app_id"]) or {}
+    return {
+        "code": item["code"],
+        "status": item["status"],
+        "expires_at": item["expires_at"],
+        "app": {"app_id": item["app_id"], "name": app.get("name") or item["app_id"]},
+        "label": item["label"],
+        "scopes": [{"key": s, "text": SCOPE_TEXT.get(s, s)} for s in item["scopes"]],
+        "devices": store.user_devices(user_id),
+    }
+
+
+@app.post("/api/v1/mobile/pairing/{code}/confirm", status_code=201)
+def mobile_pairing_confirm(code: str, body: PairingConfirmIn,
+                           user_id: str = Depends(current_user)) -> dict:
+    try:
+        grant = store.approve_pairing_code(code, user_id, body.device_id)
+    except LookupError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "binding code not found")
+    except TimeoutError:
+        raise HTTPException(status.HTTP_410_GONE, "binding code expired, please ask the app for a new one")
+    except ValueError:
+        raise HTTPException(status.HTTP_409_CONFLICT, "binding code already used")
+    except PermissionError as exc:
+        detail = ("device is not bound to this user" if str(exc) == "device_not_owned"
+                  else "application has no grantable scope")
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail)
+    store.audit(user_id, "pairing.approve", body.device_id,
+                {"app_id": grant["app_id"], "grant_id": grant["grant_id"]})
+    return grant
+
+
+@app.post("/api/v1/mobile/pairing/{code}/deny", status_code=204)
+def mobile_pairing_deny(code: str, user_id: str = Depends(current_user)) -> Response:
+    if not store.deny_pairing_code(code, user_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no pending binding code")
+    store.audit(user_id, "pairing.deny", code, {})
+    return Response(status_code=204)
+
+
+@app.get("/api/v1/mobile/grants")
+def mobile_grants(user_id: str = Depends(current_user)) -> list[dict]:
+    rows = store.list_user_grants(user_id)
+    for item in rows:
+        item["scope_text"] = [SCOPE_TEXT.get(s, s) for s in item.get("scopes") or []]
+    return rows
+
+
+@app.delete("/api/v1/mobile/grants/{grant_id}", status_code=204)
+def mobile_revoke_grant(grant_id: str, user_id: str = Depends(current_user)) -> Response:
+    if not store.revoke_grant(grant_id, user_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "grant not found")
+    store.audit(user_id, "grant.revoke", grant_id, {})
+    return Response(status_code=204)
 
 
 @app.post("/api/v1/mobile/devices/{device_id}/content", status_code=202)
@@ -531,7 +837,7 @@ def admin_creator_accounts(_: str = Depends(require_admin)) -> list[dict]:
 
 @app.get("/admin/v1/developer-submissions")
 def admin_developer_submissions(_: str = Depends(require_admin)) -> list[dict]:
-    return store.list_sandbox_apps()
+    return _attach_track(store.list_sandbox_apps())
 
 
 @app.post("/admin/v1/developer-submissions/{app_id}/decision")
@@ -540,6 +846,22 @@ def admin_developer_decision(app_id: str, body: ReviewDecision, actor: str = Dep
         raise HTTPException(status.HTTP_409_CONFLICT, "仅审核中的应用可处理")
     store.audit(actor, f"sandbox_app.{body.decision}", app_id, {"note": body.note})
     return {"app_id": app_id, "status": "published" if body.decision == "approve" else "rejected"}
+
+
+@app.get("/admin/v1/published-apps")
+def admin_published_apps(_: str = Depends(require_admin)) -> list[dict]:
+    return store.list_published_apps()
+
+
+class PublishedAppToggle(BaseModel):
+    enabled: bool
+
+
+@app.post("/admin/v1/published-apps/{app_id}/toggle")
+def admin_toggle_published_app(app_id: str, body: PublishedAppToggle, _: str = Depends(require_admin)) -> dict:
+    if not store.set_published_app_enabled(app_id, 1 if body.enabled else 0):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "未找到已发布应用记录")
+    return {"app_id": app_id, "enabled": bool(body.enabled)}
 
 
 @app.get("/admin/v1/webhook-outbox")

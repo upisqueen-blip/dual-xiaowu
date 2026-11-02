@@ -2,8 +2,9 @@
 
 // 说明页：内容配置后台（用户侧）是独立的前端应用（apps/content-console），
 // 与运营后台（本应用）分属两个受众：本应用给管理员用，内容后台给买设备的人用。
-// 默认开发地址为 http://localhost:8102，可在下方常量中调整或改成线上域名。
-const CONTENT_CONSOLE_URL = process.env.NEXT_PUBLIC_CONTENT_CONSOLE_URL || "http://localhost:8102";
+// 默认开发地址为 http://localhost:8094（start_all.bat / start_console.bat 启动的 content-console-cn），
+// 可在下方常量中调整或改成线上域名；海外部署请设置 NEXT_PUBLIC_CONTENT_CONSOLE_URL 覆盖。
+const CONTENT_CONSOLE_URL = process.env.NEXT_PUBLIC_CONTENT_CONSOLE_URL || "http://localhost:8094";
 
 export default function ContentConfigLanding() {
   return (

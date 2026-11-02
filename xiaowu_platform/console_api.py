@@ -106,28 +106,98 @@ def auth_login(body: LoginIn) -> dict[str, Any]:
 def auth_me(user_id: str = Depends(current_user)) -> dict[str, Any]:
     with store.connect() as db:
         row = db.execute("SELECT username FROM users WHERE user_id=?", (user_id,)).fetchone()
+        if not row:
+            row = db.execute("SELECT username FROM admin_accounts WHERE admin_id=?", (user_id,)).fetchone()
     return {"user_id": user_id, "username": row["username"] if row else user_id}
+
+
+# —— 找回密码（演示环境无 SMTP，验证码直接在响应中返回）——
+_reset_codes: dict[str, tuple[str, float]] = {}  # ident(lower) -> (code, expire_ts)
+_RESET_CODE_TTL = 600  # 10 分钟
+
+
+def _resolve_account(db, ident: str) -> dict[str, Any] | None:
+    """按 邮箱或用户名 在 admin / users / developer 三张表里定位账号。"""
+    i = (ident or "").strip().lower()
+    if not i:
+        return None
+    # 管理员：admin_accounts 只有 username（无 email 列）
+    row = db.execute(
+        "SELECT admin_id AS id, username, 'admin' AS kind FROM admin_accounts WHERE lower(username)=?",
+        (i,),
+    ).fetchone()
+    if row:
+        return {k: row[k] for k in row.keys()}
+    # 普通用户：users.username
+    row = db.execute(
+        "SELECT user_id AS id, username, 'user' AS kind FROM users WHERE lower(username)=?",
+        (i,),
+    ).fetchone()
+    if row:
+        return {k: row[k] for k in row.keys()}
+    # 开发者：developer_accounts.email 或 name
+    row = db.execute(
+        "SELECT developer_id AS id, email AS username, 'developer' AS kind FROM developer_accounts "
+        "WHERE lower(email)=? OR lower(name)=?",
+        (i, i),
+    ).fetchone()
+    if row:
+        return {k: row[k] for k in row.keys()}
+    return None
 
 
 @router.post("/api/auth/reset-password/send-code")
 def reset_send(body: dict[str, Any]) -> dict[str, Any]:
-    return {"ok": True, "message": "验证码已发送（演示环境未真正发信）"}
+    ident = (body.get("email") or "").strip()
+    if not ident:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "请输入注册邮箱或登录用户名")
+    with store.connect() as db:
+        acct = _resolve_account(db, ident)
+        if not acct:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "账号不存在")
+    code = f"{secrets.randbelow(1000000):06d}"
+    _reset_codes[ident.lower()] = (code, time.time() + _RESET_CODE_TTL)
+    return {
+        "ok": True,
+        "message": f"验证码（演示环境未发信，请直接填入）：{code}",
+        "dev_code": code,
+    }
 
 
 @router.post("/api/auth/reset-password")
 def reset_do(body: dict[str, Any]) -> dict[str, Any]:
-    email = (body.get("email") or "").strip()
+    ident = (body.get("email") or "").strip()
+    code = (body.get("code") or "").strip()
     password = body.get("password") or ""
-    if not email or len(password) < 4:
+    if not ident or not code or len(password) < 4:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "参数不完整")
+    entry = _reset_codes.get(ident.lower())
+    if not entry or entry[1] < time.time():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "验证码无效或已过期")
+    if entry[0] != code:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "验证码错误")
     with store.connect() as db:
-        row = db.execute("SELECT user_id FROM users WHERE username=?", (email,)).fetchone()
-        if not row:
+        acct = _resolve_account(db, ident)
+        if not acct:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "账号不存在")
-        import secrets
         salt = secrets.token_hex(16)
-        db.execute("UPDATE users SET password_hash=?, password_salt=? WHERE user_id=?",
-                   (store._password_hash(password, salt), salt, row["user_id"]))
+        phash = store._password_hash(password, salt)
+        if acct["kind"] == "admin":
+            db.execute(
+                "UPDATE admin_accounts SET password_hash=?, password_salt=? WHERE admin_id=?",
+                (phash, salt, acct["id"]),
+            )
+        elif acct["kind"] == "user":
+            db.execute(
+                "UPDATE users SET password_hash=?, password_salt=? WHERE user_id=?",
+                (phash, salt, acct["id"]),
+            )
+        else:  # developer
+            db.execute(
+                "UPDATE developer_accounts SET password_hash=?, password_salt=? WHERE developer_id=?",
+                (phash, salt, acct["id"]),
+            )
+    _reset_codes.pop(ident.lower(), None)
     return {"ok": True, "message": "密码已重置"}
 
 
@@ -267,6 +337,113 @@ def post_dual_config(mac: str, body: dict[str, Any], user_id: str = Depends(curr
         pass
     store.audit(user_id, "dual-config.save", mac, {"keys": list(payload.keys())})
     return {"ok": True, "updated_at": ts}
+
+
+# ——— 已上线应用目录（供内容后台选择并配置到双屏）———
+@router.get("/api/published-apps")
+def published_apps_for_console(user_id: str = Depends(current_user)) -> dict[str, Any]:
+    apps = store.list_published_apps(enabled_only=True)
+    return {
+        "apps": [
+            {
+                "app_id": a["app_id"],
+                "name": a["name"],
+                "description": a.get("description") or "",
+                "scene": a["scene"],
+                "preview_url": a["preview_url"],
+            }
+            for a in apps
+        ]
+    }
+
+
+class SceneCreateIn(BaseModel):
+    name: str = Field(min_length=1, max_length=40)
+    eyebrow: str = Field(default="", max_length=20)
+    desc: str = Field(default="", max_length=120)
+    icon: str = Field(default="", max_length=4)
+    scene_key: str = Field(default="", max_length=40)
+
+
+@router.get("/api/scenes")
+def list_user_scenes_for_console(user_id: str = Depends(current_user)) -> dict[str, Any]:
+    scenes = store.list_user_scenes(user_id)
+    return {"scenes": [
+        {
+            "scene_key": s["scene_key"], "name": s["name"], "eyebrow": s.get("eyebrow") or "",
+            "desc": s.get("desc") or "", "icon": s.get("icon") or "自",
+            "created_at": s.get("created_at"), "updated_at": s.get("updated_at"),
+        }
+        for s in scenes
+    ]}
+
+
+def _scene_slug(text: str) -> str:
+    out = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "-", text or "").strip("-")
+    return out or "scene"
+
+
+@router.post("/api/scenes")
+def create_user_scene_for_console(body: SceneCreateIn, user_id: str = Depends(current_user)) -> dict[str, Any]:
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "场景名称不能为空")
+    base = body.scene_key.strip() if body.scene_key else _scene_slug(name)
+    base = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff_-]", "-", base).strip("-") or "scene"
+    existing = {s["scene_key"] for s in store.list_user_scenes(user_id)}
+    key = base
+    while key in existing:
+        key = f"{base}-{secrets.token_hex(3)}"
+    store.create_user_scene(user_id, key, name, body.eyebrow.strip(), body.desc.strip(), body.icon.strip() or "自")
+    s = store.get_user_scene(user_id, key)
+    return {"scene": {
+        "scene_key": s["scene_key"], "name": s["name"], "eyebrow": s.get("eyebrow") or "",
+        "desc": s.get("desc") or "", "icon": s.get("icon") or "自",
+        "created_at": s.get("created_at"), "updated_at": s.get("updated_at"),
+    }}
+
+
+class SceneUpdateIn(BaseModel):
+    name: str = Field(default="", max_length=40)
+    eyebrow: str = Field(default="", max_length=20)
+    desc: str = Field(default="", max_length=120)
+    icon: str = Field(default="", max_length=4)
+
+
+@router.put("/api/scenes/{scene_key}")
+def update_user_scene_for_console(scene_key: str, body: SceneUpdateIn, user_id: str = Depends(current_user)) -> dict[str, Any]:
+    if not store.get_user_scene(user_id, scene_key):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "场景不存在")
+    fields = {k: v for k, v in body.model_dump().items() if v != ""}
+    if not store.update_user_scene(user_id, scene_key, fields):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "没有可更新的字段")
+    s = store.get_user_scene(user_id, scene_key)
+    return {"scene": {
+        "scene_key": s["scene_key"], "name": s["name"], "eyebrow": s.get("eyebrow") or "",
+        "desc": s.get("desc") or "", "icon": s.get("icon") or "自",
+    }}
+
+
+@router.delete("/api/scenes/{scene_key}")
+def delete_user_scene_for_console(scene_key: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
+    if not store.delete_user_scene(user_id, scene_key):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "场景不存在")
+    return {"deleted": scene_key}
+
+
+@router.post("/api/lightacade/live-ticket")
+async def lightacade_live_ticket() -> dict[str, Any]:
+    """LightAcade 口语陪练票据接口（固件首页「口语陪练」菜单项调用）。
+
+    本地/自托管后端未接入 LightAcade 合作方服务（真实票据由 aioneschool.com
+    发放）。未配置时返回明确的 503 而非 404，避免固件日志出现难以排查的
+    "Ticket endpoint HTTP 404"。生产环境若已采购合作方服务，应在此代理到
+    POST /api/partner/v1/speech/live-tickets 并返回 {ticket, expiresInSeconds}。
+    """
+    raise HTTPException(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        "LightAcade partner service not configured in this environment",
+    )
 
 
 # 注：固件取图接口 GET /api/render 统一由 render_api.py 提供（含设备绑定判定、

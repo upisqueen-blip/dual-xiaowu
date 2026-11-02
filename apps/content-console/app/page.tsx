@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  Bell, BookOpen, CalendarDays, Check, ChevronDown, CircleUserRound, Cloud, CloudRain, CloudSnow, CloudSun, Sun, Cpu,   Home,
+  Bell, BookOpen, Boxes, CalendarDays, Check, ChevronDown, CircleUserRound, Cloud, CloudRain, CloudSnow, CloudSun, Sun, Cpu,   Home,
   History, KeyRound, LayoutDashboard, Link2, ListChecks, LoaderCircle, LogOut, MonitorCog, MoreHorizontal,
   NotebookPen, Plus, RefreshCw, Save, ScanText, Settings2, ShieldCheck, Sparkles, StickyNote, Trash2, UserCog, Users,
   Image as ImageIcon,
@@ -10,15 +10,15 @@ import {
 } from "lucide-react";
 import { api, clearToken, getToken, setToken } from "@/lib/api";
 
-type SceneKey = "family" | "study" | "finance" | "health" | "office" | "custom";
-type NavKey = "dashboard" | "scenes" | "screens" | "content" | "devices" | "members" | "auth" | "profile" | "settings";
-type ScreenConfig = { title: string; source: string; refresh: string; modules: string[]; mode?: string };
+type SceneKey = string;
+type NavKey = "dashboard" | "scenes" | "screens" | "content" | "apps" | "devices" | "members" | "auth" | "profile" | "settings";
+type ScreenConfig = { title: string; source: string; refresh: string; modules: string[]; mode?: string; appId?: string };
 type DualWeatherPreview = { city: string; today_temp: string; current_temp?: string; today_desc: string; today_code?: number; today_low: string; today_high: string; today_humidity?: string; today_wind_dir?: string; today_wind_level?: string; sunrise?: string; sunset?: string; advice?: string; forecast?: { day: string; date: string; temp_range: string; desc: string; code?: number }[]; feels_like?: string | number | null };
 type Scene = { name: string; eyebrow: string; desc: string; icon: string; a: ScreenConfig; b: ScreenConfig };
 type User = { user_id: number; username: string };
 type Device = { mac: string; nickname?: string; role?: string; status?: string; is_online?: boolean; last_seen?: string };
 
-const scenes: Record<SceneKey, Scene> = {
+const presetScenes: Record<string, Scene> = {
   family: {
     name: "家庭", eyebrow: "默认场景", icon: "家", desc: "让每个人都看见今天的重要安排",
     a: { title: "今日家庭提醒", source: "家庭内容管理", refresh: "每 10 分钟", mode: "family", modules: ["天气", "快递与缴费", "家庭待办", "采购清单", "纪念日"] },
@@ -45,17 +45,21 @@ const scenes: Record<SceneKey, Scene> = {
     b: { title: "办公展示", source: "后台相册/TF 卡", refresh: "每 30 分钟", mode: "album", modules: ["团队照片", "企业海报", "产品宣传", "二维码", "会议室状态"] },
   },
   custom: {
-    name: "自定义", eyebrow: "自由组合", icon: "自", desc: "从模块库搭建适合自己的双屏",
-    a: { title: "自定义 A 屏", source: "用户配置", refresh: "自定义", mode: "custom", modules: ["待办", "天气", "便签"] },
-    b: { title: "自定义 B 屏", source: "用户配置", refresh: "自定义", mode: "calendar", modules: ["日程", "相册", "倒计时"] },
+    name: "自由组合", eyebrow: "空白画布", icon: "自", desc: "自由编排的双屏画布：可搭建模块，也能直接编排已上线的应用",
+    a: { title: "自由组合 A 屏", source: "用户配置", refresh: "自定义", mode: "custom", modules: ["待办", "天气", "便签"] },
+    b: { title: "自由组合 B 屏", source: "用户配置", refresh: "自定义", mode: "calendar", modules: ["日程", "相册", "倒计时"] },
   },
 };
+
+// 预设场景为不可变基线；scenes 为「预设 + 用户自定义」合并后的可变映射（运行时由后端自定义场景覆盖/补充）。
+let scenes: Record<string, Scene> = { ...presetScenes };
 
 const navItems: { key: NavKey; label: string; icon: typeof Home }[] = [
   { key: "dashboard", label: "总览", icon: LayoutDashboard },
   { key: "scenes", label: "场景中心", icon: Sparkles },
   { key: "screens", label: "双屏配置", icon: MonitorCog },
   { key: "content", label: "内容管理", icon: NotebookPen },
+  { key: "apps", label: "已上线应用", icon: Boxes },
   { key: "devices", label: "设备管理", icon: Cpu },
   { key: "members", label: "共享成员", icon: Users },
   { key: "auth", label: "老师授权", icon: KeyRound },
@@ -74,6 +78,8 @@ export default function DualConsole() {
   const [pairOpen, setPairOpen] = useState(false);
   const [toast, setToast] = useState("");
   const [savedAt, setSavedAt] = useState("");
+  const [sceneTick, setSceneTick] = useState(0);
+  const [customSceneKeys, setCustomSceneKeys] = useState<string[]>([]);
   const [config, setConfig] = useState<Record<SceneKey, { a: ScreenConfig; b: ScreenConfig }>>(() =>
     Object.fromEntries(Object.entries(scenes).map(([k, v]) => [k, { a: v.a, b: v.b }])) as Record<SceneKey, { a: ScreenConfig; b: ScreenConfig }>,
   );
@@ -126,6 +132,7 @@ export default function DualConsole() {
       const me = await api<User>("/api/auth/me");
       setUser(me);
       await loadDevices();
+      await loadUserScenes();
     } catch {
       clearToken();
     } finally { setLoading(false); }
@@ -138,6 +145,46 @@ export default function DualConsole() {
       setDevices(list);
       setDeviceMac((current) => current || list[0]?.mac || "");
     } catch (error) { notify((error as Error).message); }
+  }
+
+  // 加载当前用户的「自定义场景」（后端持久化），合并进 scenes 映射并补齐 config 条目。
+  async function loadUserScenes() {
+    if (!getToken()) return;
+    try {
+      const r = await api<{ scenes: { scene_key: string; name: string; eyebrow: string; desc: string; icon: string }[] }>("/api/scenes");
+      const map: Record<string, Scene> = {};
+      for (const s of r.scenes || []) {
+        const base: Scene = {
+          name: s.name, eyebrow: s.eyebrow || "自定义场景", icon: s.icon || "自", desc: s.desc || "",
+          a: { title: `${s.name} · A 屏`, source: "用户配置", refresh: "自定义", mode: "custom", modules: [] },
+          b: { title: `${s.name} · B 屏`, source: "用户配置", refresh: "自定义", mode: "calendar", modules: [] },
+        };
+        map[s.scene_key] = base;
+      }
+      scenes = { ...presetScenes, ...map };
+      setCustomSceneKeys(Object.keys(map));
+      setConfig((prev) => {
+        const next: Record<string, { a: ScreenConfig; b: ScreenConfig }> = { ...prev };
+        for (const k of Object.keys(map)) if (!next[k]) next[k] = { a: { ...map[k].a }, b: { ...map[k].b } };
+        return next;
+      });
+      setSceneTick((t) => t + 1);
+    } catch (error) { notify((error as Error).message); }
+  }
+
+  async function createUserScene(data: { name: string; eyebrow?: string; desc?: string; icon?: string }) {
+    const r = await api<{ scene: { scene_key: string; name: string } }>("/api/scenes", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: data.name, eyebrow: data.eyebrow || "", desc: data.desc || "", icon: data.icon || "自" }),
+    });
+    await loadUserScenes();
+    notify(`已创建场景「${r.scene.name}」`);
+  }
+
+  async function deleteUserScene(key: string) {
+    await api(`/api/scenes/${encodeURIComponent(key)}`, { method: "DELETE" });
+    await loadUserScenes();
+    notify("已删除自定义场景");
   }
 
   function notify(message: string) {
@@ -179,11 +226,25 @@ export default function DualConsole() {
     }
   }
 
+  async function assignPublishedApp(screen: "a" | "b", app: { app_id: string; name: string; preview_url: string }) {
+    updateScreen(screen, {
+      mode: "published-app",
+      appId: app.app_id,
+      title: app.name,
+      source: app.preview_url,
+      refresh: "每次唤醒",
+      modules: [],
+    });
+    saveConfiguration();
+    notify(`已将「${app.name}」配置到 ${screen.toUpperCase()} 屏，正在下发到设备…`);
+    await applyToDevice();
+  }
+
   function logout() {
     clearToken(); setUser(null); setDevices([]); setDeviceMac(""); notify("已退出登录");
   }
 
-  const title = { dashboard: "设备总览", scenes: "场景中心", screens: "双屏配置", content: "内容管理", devices: "设备管理", members: "共享成员", auth: "老师授权", profile: "个人信息", settings: "系统配置" }[nav];
+  const title = { dashboard: "设备总览", scenes: "场景中心", screens: "双屏配置", content: "内容管理", apps: "已上线应用", devices: "设备管理", members: "共享成员", auth: "老师授权", profile: "个人信息", settings: "系统配置" }[nav];
 
   return (
     <div className="shell">
@@ -216,9 +277,10 @@ export default function DualConsole() {
         <div className="content">
           {loading ? <div className="loading"><LoaderCircle className="spin"/>正在连接 小悟AI…</div> : null}
           {!loading && nav === "dashboard" ? <Dashboard user={user} devices={devices} sceneKey={sceneKey} selectedDevice={selectedDevice} setNav={setNav} openAuth={() => setAuthOpen(true)} openPair={() => setPairOpen(true)} /> : null}
-          {!loading && nav === "scenes" ? <SceneCenter selected={sceneKey} choose={chooseScene} openConfig={() => setNav("screens")} /> : null}
+          {!loading && nav === "scenes" ? <SceneCenter selected={sceneKey} choose={chooseScene} openConfig={() => setNav("screens")} onAssign={assignPublishedApp} hasDevice={!!selectedDevice} notify={notify} customSceneKeys={customSceneKeys} onCreate={createUserScene} onDelete={deleteUserScene} loggedIn={!!user} /> : null}
           {!loading && nav === "screens" ? <ScreenEditor scene={scene} sceneKey={sceneKey} value={config[sceneKey]} update={updateScreen} save={saveConfiguration} savedAt={savedAt} content={content} apply={applyToDevice} hasDevice={!!selectedDevice} deviceMac={selectedDevice?.mac || ""} screen={screen} setScreen={setScreen} /> : null}
           {!loading && nav === "content" ? <ContentStudio content={content} setContent={setContent} save={saveConfiguration} savedAt={savedAt} notify={notify} apply={applyToDevice} hasDevice={!!selectedDevice} deviceMac={selectedDevice?.mac || ""} screen={screen} sceneKey={sceneKey} aMode={config[sceneKey].a.mode || "notes"} bMode={config[sceneKey].b.mode || "course"} /> : null}
+          {!loading && nav === "apps" ? <PublishedApps onAssign={assignPublishedApp} hasDevice={!!selectedDevice} notify={notify} /> : null}
           {!loading && nav === "devices" ? <DeviceManager devices={devices} user={user} refresh={loadDevices} openAuth={() => setAuthOpen(true)} openPair={() => setPairOpen(true)} notify={notify} choose={(mac) => { setDeviceMac(mac); setNav("screens"); }} /> : null}
           {!loading && nav === "members" ? <MembersPanel device={selectedDevice} user={user} notify={notify} /> : null}
           {!loading && nav === "auth" ? <TeacherAuthPanel device={selectedDevice} user={user} notify={notify} /> : null}
@@ -256,15 +318,107 @@ function Stat({ icon, label, value, note }: { icon: React.ReactNode; label: stri
   return <div className="stat"><div className="stat-icon">{icon}</div><div><span>{label}</span><strong>{value}</strong><small>{note}</small></div></div>;
 }
 
-function SceneCenter({ selected, choose, openConfig }: { selected: SceneKey; choose: (k: SceneKey) => void; openConfig: () => void }) {
+function SceneCenter({ selected, choose, openConfig, onAssign, hasDevice, notify, customSceneKeys, onCreate, onDelete, loggedIn }: {
+  selected: SceneKey; choose: (k: SceneKey) => void; openConfig: () => void;
+  onAssign: (s: "a" | "b", app: { app_id: string; name: string; preview_url: string }) => Promise<void>;
+  hasDevice: boolean; notify: (m: string) => void; customSceneKeys: string[];
+  onCreate: (data: { name: string; eyebrow?: string; desc?: string; icon?: string }) => Promise<void>;
+  onDelete: (key: string) => Promise<void>; loggedIn: boolean;
+}) {
+  const [apps, setApps] = useState<{ app_id: string; name: string; description: string; scene: string; preview_url: string }[]>([]);
+  const [appErr, setAppErr] = useState("");
+  const [busy, setBusy] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [form, setForm] = useState({ name: "", eyebrow: "", desc: "", icon: "自" });
+  useEffect(() => {
+    api<{ apps: { app_id: string; name: string; description: string; scene: string; preview_url: string }[] }>("/api/published-apps")
+      .then((r) => setApps(r.apps || []))
+      .catch((e) => setAppErr((e as Error).message));
+  }, []);
+  const current = scenes[selected];
+  const isCustom = customSceneKeys.includes(selected);
+  // 用户自定义场景与预设「自由组合」(custom) 画布都展示全部已上线应用，供手动编排；
+  // 其余预设场景则按应用提交时归属的 scene 标签过滤。
+  const showAllApps = isCustom || selected === "custom";
+  const sceneApps = showAllApps ? apps : apps.filter((a) => a.scene === selected);
+  const assign = (s: "a" | "b", app: { app_id: string; name: string; preview_url: string }) => {
+    setBusy(app.app_id + s);
+    onAssign(s, app).finally(() => setBusy(""));
+  };
   return <>
-    <div className="page-intro"><div><span className="kicker">SCENE LIBRARY</span><h2>先选生活，再配屏幕</h2><p>每个场景都是一套可修改的双屏起点，切换不会删除你的自定义内容。</p></div></div>
-    <div className="scene-grid">{(Object.entries(scenes) as [SceneKey, Scene][]).map(([key, item]) => <button key={key} onClick={() => choose(key)} className={`scene-card ${selected === key ? "selected" : ""}`}>
-      <div className="scene-top"><span className="scene-icon">{item.icon}</span><span className="scene-eyebrow">{item.eyebrow}</span>{selected === key ? <i><Check size={13}/></i> : null}</div>
-      <h3>{item.name}场景</h3><p>{item.desc}</p>
-      <div className="scene-screens"><span><b>A</b>{item.a.title}</span><span><b>B</b>{item.b.title}</span></div>
-    </button>)}</div>
-    <div className="selection-bar"><div><Check size={18}/><span>已选择 <b>{scenes[selected].name}场景</b><small>A 屏：{scenes[selected].a.title} · B 屏：{scenes[selected].b.title}</small></span></div><button className="button primary" onClick={openConfig}>继续配置双屏</button></div>
+    <div className="page-intro"><div><span className="kicker">SCENE LIBRARY</span><h2>先选生活，再配屏幕</h2><p>每个场景都是一套可修改的双屏起点，切换不会删除你的自定义内容。已上线的应用可按场景归类并配置到 A/B 屏。</p></div></div>
+    <div className="scene-grid">
+      {(Object.entries(scenes) as [SceneKey, Scene][]).map(([key, item]) => (
+        <div key={key} className={`scene-cell ${selected === key ? "selected" : ""}`}>
+          <button onClick={() => choose(key)} className="scene-card">
+            <div className="scene-top"><span className="scene-icon">{item.icon}</span><span className="scene-eyebrow">{item.eyebrow}</span>{selected === key ? <i><Check size={13}/></i> : null}</div>
+            <h3>{item.name}场景</h3><p>{item.desc}</p>
+            <div className="scene-screens"><span><b>A</b>{item.a.title}</span><span><b>B</b>{item.b.title}</span></div>
+          </button>
+          {isCustom && key === selected && loggedIn ? (
+            <button className="scene-del" title="删除该自定义场景" onClick={() => { if (window.confirm(`确定删除自定义场景「${item.name}」？已配置的内容会一并失效。`)) onDelete(key); }}><Trash2 size={14}/></button>
+          ) : null}
+        </div>
+      ))}
+      {loggedIn ? (
+        <button className="scene-card scene-add" onClick={() => setCreating(true)}>
+          <div className="scene-top"><span className="scene-icon"><Plus size={18}/></span><span className="scene-eyebrow">新建</span></div>
+          <h3>自定义场景</h3><p>创建属于你自己的双屏场景，并在其中编排已上线应用。</p>
+        </button>
+      ) : null}
+    </div>
+
+    {creating ? (
+      <div className="card-pad" style={{ marginTop: 16 }}>
+        <div className="section-heading"><span>NEW SCENE</span><h3>新建自定义场景</h3></div>
+        <div className="scene-form">
+          <label>场景名称<input className="cs-input" value={form.name} maxLength={40} placeholder="如：晨间仪式" onChange={(e) => setForm({ ...form, name: e.target.value })} /></label>
+          <label>副标题<input className="cs-input" value={form.eyebrow} maxLength={20} placeholder="如：我的专注空间" onChange={(e) => setForm({ ...form, eyebrow: e.target.value })} /></label>
+          <label>图标<input className="cs-input" value={form.icon} maxLength={4} placeholder="自" onChange={(e) => setForm({ ...form, icon: e.target.value })} /></label>
+          <label className="full">描述<input className="cs-input" value={form.desc} maxLength={120} placeholder="这个场景用来做什么" onChange={(e) => setForm({ ...form, desc: e.target.value })} /></label>
+        </div>
+        <div className="save-actions">
+          <button className="button primary" disabled={!form.name.trim()} onClick={() => { onCreate({ name: form.name.trim(), eyebrow: form.eyebrow.trim(), desc: form.desc.trim(), icon: form.icon.trim() }).then(() => { setCreating(false); setForm({ name: "", eyebrow: "", desc: "", icon: "自" }); }); }}>创建并启用</button>
+          <button className="button soft" onClick={() => setCreating(false)}>取消</button>
+        </div>
+      </div>
+    ) : null}
+
+    {current ? (
+      <div className="card-pad" style={{ marginTop: 16 }}>
+        <div className="section-heading"><span>PUBLISHED APPS · {current.name}</span><h3>为「{current.name}」场景配置已上线应用</h3></div>
+        <p className="muted" style={{ fontSize: 12, lineHeight: 1.6, margin: "0 0 14px" }}>
+          {showAllApps
+            ? "本场景可手动编排任意已上线应用：点击下方按钮即可把应用配置到 A/B 屏，设备下次唤醒会渲染该应用的 e-ink 卡片（扫码在手机打开完整交互）。"
+            : `仅显示属于「${current.name}」场景的已上线应用（应用提交时归属的 scene=${selected}）。点击即可配置到 A/B 屏。`}
+        </p>
+        {appErr ? <p className="form-error">{appErr}</p> :
+          sceneApps.length === 0 ? (
+            <div className="empty"><div><Boxes size={24} /></div><h2>本场景暂无匹配的已上线应用</h2><p>{showAllApps ? "去「已上线应用」确认有应用已审核通过并启用。" : "该预设场景当前没有归属此分类的已上线应用；如需在此放置应用，可改用「自由组合」或自定义场景（可放置任意应用）。"}</p></div>
+          ) : (
+            <div className="app-list">
+              {sceneApps.map((a) => (
+                <article key={a.app_id} className="app-card">
+                  <div className="app-card-main">
+                    <span className="app-badge">已上线</span><span className="app-badge isv">ISV提供</span><span className="app-badge isv">ISV提供</span>
+                    <h3>{a.name}</h3>
+                    <code>{a.app_id} · {a.scene}</code>
+                    <p>{a.description || "暂无说明"}</p>
+                  </div>
+                  <div className="app-actions">
+                    <button className="button sm" disabled={!hasDevice || busy === a.app_id + "a"} onClick={() => assign("a", a)}>设为 A 屏</button>
+                    <button className="button sm soft" disabled={!hasDevice || busy === a.app_id + "b"} onClick={() => assign("b", a)}>设为 B 屏</button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
+      </div>
+    ) : null}
+
+    {current ? (
+      <div className="selection-bar"><div><Check size={18}/><span>已选择 <b>{current.name}场景</b><small>A 屏：{current.a.title} · B 屏：{current.b.title}</small></span></div><button className="button primary" onClick={openConfig}>继续配置双屏</button></div>
+    ) : null}
   </>;
 }
 
@@ -285,6 +439,49 @@ function useDualWeatherPreview(enabled: boolean, deviceMac: string, city: string
     return () => { active = false; };
   }, [enabled, deviceMac, city]);
   return { weatherPreview, weatherLoading, weatherError };
+}
+
+function PublishedApps({ onAssign, hasDevice, notify }: {
+  onAssign: (s: "a" | "b", app: { app_id: string; name: string; preview_url: string }) => Promise<void>;
+  hasDevice: boolean; notify: (m: string) => void;
+}) {
+  const [apps, setApps] = useState<{ app_id: string; name: string; description: string; scene: string; preview_url: string }[]>([]);
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState("");
+  useEffect(() => {
+    api<{ apps: { app_id: string; name: string; description: string; scene: string; preview_url: string }[] }>("/api/published-apps")
+      .then((r) => setApps(r.apps || []))
+      .catch((e) => setErr((e as Error).message));
+  }, []);
+  return (
+    <div className="card-pad">
+      <div className="section-heading"><span>PUBLISHED APPS</span><h3>已上线应用</h3></div>
+      <p className="muted" style={{ fontSize: 12, lineHeight: 1.6, margin: "0 0 16px" }}>
+        把开发者已上线的应用配置到 A/B 屏。设备拉图时由后端生成 e-ink 卡片（应用名 + 简介 + 入口二维码），扫码即可在手机打开完整交互应用。
+      </p>
+      {err ? <p className="form-error">{err}</p> :
+        apps.length === 0 ? (
+          <div className="empty"><div><Boxes size={24} /></div><h2>暂无已上线应用</h2><p>开发者在「创作者中心」提交、管理员在「平台运营后台 → 贡献应用」审核通过后，会出现在这里。</p></div>
+        ) : (
+          <div className="app-list">
+            {apps.map((a) => (
+              <article key={a.app_id} className="app-card">
+                <div className="app-card-main">
+                  <span className="app-badge">已上线</span><span className="app-badge isv">ISV提供</span><span className="app-badge isv">ISV提供</span>
+                  <h3>{a.name}</h3>
+                  <code>{a.app_id} · {a.scene}</code>
+                  <p>{a.description || "暂无说明"}</p>
+                </div>
+                <div className="app-actions">
+                  <button className="button sm" disabled={!hasDevice || busy === a.app_id + "a"} onClick={() => { setBusy(a.app_id + "a"); onAssign("a", a).finally(() => setBusy("")); }}>设为 A 屏</button>
+                  <button className="button sm soft" disabled={!hasDevice || busy === a.app_id + "b"} onClick={() => { setBusy(a.app_id + "b"); onAssign("b", a).finally(() => setBusy("")); }}>设为 B 屏</button>
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+    </div>
+  );
 }
 
 function ScreenEditor({ scene, sceneKey, value, update, save, savedAt, content, apply, hasDevice, deviceMac, screen, setScreen }: { scene: Scene; sceneKey: SceneKey; value: { a: ScreenConfig; b: ScreenConfig }; update: (s: "a"|"b", p: Partial<ScreenConfig>) => void; save: () => void; savedAt: string; content: ContentState; apply: () => void; hasDevice: boolean; deviceMac: string; screen: { size: "4.2" | "5.83"; colors: 2 | 3 | 4 }; setScreen: (s: { size: "4.2" | "5.83"; colors: 2 | 3 | 4 }) => void }) {
@@ -351,13 +548,24 @@ const SCENE_MODES: Record<SceneKey, { a: { key: string; label: string }[]; b: { 
     b: [{ key: "album", label: "展示相册" }, { key: "office", label: "办公看板" }],
   },
   custom: {
-    a: [{ key: "notes", label: "便签" }, { key: "homework", label: "待办" }, { key: "reading", label: "阅读" }, { key: "album", label: "相册" }],
-    b: [{ key: "course", label: "课程表" }, { key: "calendar", label: "日历" }, { key: "album", label: "相册" }],
+    a: [{ key: "notes", label: "便签" }, { key: "homework", label: "待办" }, { key: "reading", label: "阅读" }, { key: "album", label: "相册" }, { key: "published-app", label: "已上线应用" }],
+    b: [{ key: "course", label: "课程表" }, { key: "calendar", label: "日历" }, { key: "album", label: "相册" }, { key: "published-app", label: "已上线应用" }],
   },
 };
 
 function ScreenForm({ kind, sceneKey, value, onChange }: { kind: "a"|"b"; sceneKey: SceneKey; value: ScreenConfig; onChange: (p: Partial<ScreenConfig>) => void }) {
-  const modes = SCENE_MODES[sceneKey][kind];
+  const [pubApps, setPubApps] = useState<{ app_id: string; name: string; description: string; scene: string; preview_url: string }[]>([]);
+  const [pubErr, setPubErr] = useState("");
+  useEffect(() => {
+    if (value.mode !== "published-app") return;
+    api<{ apps: { app_id: string; name: string; description: string; scene: string; preview_url: string }[] }>("/api/published-apps")
+      .then((r) => setPubApps(r.apps || []))
+      .catch((e) => setPubErr((e as Error).message));
+  }, [value.mode]);
+  const baseModes = (SCENE_MODES[sceneKey] || SCENE_MODES.custom)[kind] || [];
+  const modes = value.mode === "published-app" && !baseModes.some((m) => m.key === "published-app")
+    ? [...baseModes, { key: "published-app", label: "已上线应用" }]
+    : baseModes;
   const familySource = (mode: string) => kind === "b"
     ? mode === "album" ? "后台相册（内容管理）" : "后台家庭日程（内容管理）"
     : ({ family: "家庭内容管理（天气、快递缴费、待办、日程、采购、纪念日）", "family-weather": "和风天气 API（设备城市）", "family-express-bills": "家庭内容管理（快递与缴费）", "family-todos": "家庭内容管理（待办与便签）", "family-shopping": "家庭内容管理（采购清单）", "family-anniversary": "家庭内容管理（纪念日）", notes: "后台便签", album: "后台相册（内容管理）" } as Record<string, string>)[mode] || "家庭内容管理";
@@ -370,6 +578,26 @@ function ScreenForm({ kind, sceneKey, value, onChange }: { kind: "a"|"b"; sceneK
     <div className="screen-form-head"><div><span>{kind.toUpperCase()} 屏</span><h3>{kind === "a" ? "FPC1 · 黑白快刷" : "FPC2 · 三色 / 四色"}</h3></div><span className="screen-status"><i/>已启用</span></div>
     <label>屏幕内容名称<input value={value.title} onChange={(e) => onChange({ title: e.target.value })}/></label>
     <label>{kind.toUpperCase()} 屏模式<select value={value.mode || modes[0].key} onChange={(e) => onChange({ mode: e.target.value, ...(sceneKey === "family" ? { source: familySource(e.target.value) } : {}) })}>{modes.map((m) => <option key={m.key} value={m.key}>{m.label}</option>)}</select></label>
+    {value.mode === "published-app" ? (
+      <div className="pub-app-pick">
+        <label>ISV 应用
+          {pubApps.length === 0 ? (
+            <span className="pub-app-empty">暂无已上线应用，请先在「已上线应用」确认开发者提交的应用已审核通过并启用。</span>
+          ) : (
+            <select value={value.appId || ""} onChange={(e) => { const a = pubApps.find((x) => x.app_id === e.target.value); if (a) onChange({ mode: "published-app", appId: a.app_id, title: a.name, source: a.preview_url, refresh: "每次唤醒" }); }}>
+              <option value="">请选择要展示的 ISV 应用…</option>
+              {pubApps.map((a) => <option key={a.app_id} value={a.app_id}>{a.name}（ISV提供）</option>)}
+            </select>
+          )}
+        </label>
+        {pubErr ? <p className="form-error">{pubErr}</p> : null}
+        {value.appId ? (
+          <p className="tt-hint">当前展示：<b>{value.title}</b> · ISV提供。设备拉图时由后端生成该应用的 e-ink 卡片（应用名 + 简介 + 入口二维码），扫码在手机打开完整交互。</p>
+        ) : (
+          <p className="tt-hint">选择「已上线应用」模式后，请从上方选择一款已审核上线的 ISV 应用，保存即下发到本屏。</p>
+        )}
+      </div>
+    ) : null}
     {sceneKey === "family" && <p className="tt-hint">家庭提醒由所选模式决定读取的内容，来源标签自动对应「内容管理」中的相应数据，不能手动选成其他来源；家庭日程在「内容管理 → 家庭日程」维护。{value.mode === "family-weather" ? "城市在 dual「个人中心 → 家庭与设备位置」设置；此处会请求实时天气，设备刷新时也使用同一城市。" : ""}</p>}
     <div className="field-row"><label>数据来源{sceneKey === "family" ? <input value={familySource(value.mode || modes[0].key)} readOnly /> : <select value={value.source} onChange={(e) => onChange({ source: e.target.value })}>{[value.source, ...sourceOptions.filter((source) => source !== value.source)].map((source) => <option key={source} value={source}>{source}</option>)}</select>}</label><label>刷新频率<select value={value.refresh} onChange={(e) => onChange({ refresh: e.target.value })}>{[value.refresh, ...refreshOptions.filter((refresh) => refresh !== value.refresh)].map((refresh) => <option key={refresh} value={refresh}>{refresh}</option>)}</select></label></div>
     <div className="module-label"><span>内容模块</span><button onClick={() => { const preset = ["相册", "天气", "倒计时"].find((m) => !value.modules.includes(m)) || "新模块"; onChange({ modules: [...value.modules, preset] }); }}><Plus size={14}/>添加</button></div>
