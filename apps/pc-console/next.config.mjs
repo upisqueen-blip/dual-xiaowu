@@ -46,9 +46,7 @@ const config = {
   },
   async redirects() {
     return [
-      // 旧的 /developer 入口已并入根路径，做 301 兼容旧书签
-      { source: "/developer", destination: "/", permanent: false },
-      { source: "/developer/:path*", destination: "/", permanent: false },
+      // /developer 已是真实子入口（app/developer），不再重定向到 /
       // 内容配置说明页已由真正的 /admin 后台取代
       { source: "/content-config", destination: "/admin", permanent: false },
     ];

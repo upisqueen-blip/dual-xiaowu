@@ -12,7 +12,7 @@ import {
 import { api, authHeaders, clearToken, getToken, setToken } from "@/lib/api";
 
 type SceneKey = string;
-type NavKey = "dashboard" | "scenes" | "screens" | "content" | "apps" | "financeStocks" | "devices" | "members" | "auth" | "profile" | "connectors" | "settings" | "guide";
+type NavKey = "dashboard" | "scenes" | "screens" | "content" | "apps" | "financeStocks" | "devices" | "members" | "profile" | "connectors" | "settings" | "guide";
 type ScreenConfig = { title: string; source: string; refresh: string; modules: string[]; mode?: string; appId?: string };
 type DualWeatherPreview = { city: string; today_temp: string; current_temp?: string; today_desc: string; today_code?: number; today_low: string; today_high: string; today_humidity?: string; today_wind_dir?: string; today_wind_level?: string; sunrise?: string; sunset?: string; advice?: string; forecast?: { day: string; date: string; temp_range: string; desc: string; code?: number }[]; feels_like?: string | number | null; city_pinyin?: string; solar_term?: string; solar_term_day?: string; updated_at?: string; lunar_date?: string; lunar_year?: string; lunar_zodiac?: string; plate_limit?: string };
 type Scene = { name: string; eyebrow: string; desc: string; icon: string; a: ScreenConfig; b: ScreenConfig };
@@ -287,7 +287,7 @@ export default function DualConsole() {
     else if (i === 2) { setNav("scenes"); }
   }
 
-  const title = { dashboard: "设备总览", scenes: "场景中心", screens: "双屏配置", content: "内容管理", apps: "已上线应用", financeStocks: "理财自选", devices: "设备管理", members: "共享成员", auth: "邀请老师", connectors: "连接器", profile: "个人信息", settings: "系统配置", guide: "配置引导" }[nav];
+  const title = { dashboard: "设备总览", scenes: "场景中心", screens: "双屏配置", content: "内容管理", apps: "已上线应用", financeStocks: "理财自选", devices: "设备管理", members: "共享成员", connectors: "连接器", profile: "个人信息", settings: "系统配置", guide: "配置引导" }[nav];
 
   return (
     <div className="shell">
@@ -328,8 +328,7 @@ export default function DualConsole() {
           {!loading && nav === "guide" ? <ConfigGuide onStep={handleGuideStep} /> : null}
           {!loading && nav === "financeStocks" ? <FinanceWatchlist user={user} notify={notify} device={selectedDevice} /> : null}
           {!loading && nav === "devices" ? <DeviceManager devices={devices} user={user} refresh={loadDevices} openAuth={() => setAuthOpen(true)} openPair={() => setPairOpen(true)} notify={notify} choose={(mac) => { setDeviceMac(mac); setNav("screens"); }} /> : null}
-          {!loading && nav === "members" ? <MembersPanel device={selectedDevice} user={user} notify={notify} setNav={setNav} /> : null}
-          {!loading && nav === "auth" ? <TeacherAuthPanel device={selectedDevice} user={user} notify={notify} setNav={setNav} /> : null}
+          {!loading && nav === "members" ? <MembersPanel device={selectedDevice} user={user} notify={notify} /> : null}
           {!loading && nav === "profile" ? <ProfilePanel user={user} notify={notify} content={content} setContent={setContent} save={saveConfiguration} apply={applyToDevice} hasDevice={!!selectedDevice} /> : null}
           {!loading && nav === "connectors" ? <ConnectorsPanel user={user} notify={notify} /> : null}
           {!loading && nav === "settings" ? <ServiceConfigPanel user={user} notify={notify} /> : null}
@@ -1330,7 +1329,7 @@ function DeviceManager({ devices, user, refresh, openAuth, openPair, notify, cho
   </>;
 }
 
-function MembersPanel({ device, user, notify, setNav }: { device?: Device; user: User|null; notify:(m:string)=>void; setNav:(v:NavKey)=>void }) {
+function MembersPanel({ device, user, notify }: { device?: Device; user: User|null; notify:(m:string)=>void }) {
   const [members, setMembers] = useState<Array<{user_id:number;username:string;role?:string}>>([]); const [name,setName]=useState(""); const [busy,setBusy]=useState(false);
   useEffect(()=>{ if (!device||!user) return; api<{members?:typeof members}>(`/api/user/devices/${encodeURIComponent(device.mac)}/members`).then(r=>setMembers(r.members||[])).catch(()=>setMembers([])); },[device,user]);
   async function share(){ if(!device||!name.trim())return;setBusy(true);try{await api(`/api/user/devices/${encodeURIComponent(device.mac)}/share`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:name.trim()})});setName("");notify("共享邀请已发送");}catch(e){notify((e as Error).message)}finally{setBusy(false)}}
@@ -1341,14 +1340,6 @@ function MembersPanel({ device, user, notify, setNav }: { device?: Device; user:
     <div className="member-layout">
       <div className="member-card"><h3>邀请成员</h3><p>输入对方的 小悟AI 用户名。</p><div className="inline-form"><input placeholder="用户名" value={name} onChange={e=>setName(e.target.value)}/><button className="button primary" disabled={busy} onClick={()=>void share()}>{busy?<LoaderCircle className="spin" size={16}/>:<Plus size={16}/>}发送邀请</button></div></div>
       <div className="member-card"><h3>当前成员 <span>{members.length}</span></h3>{members.length?members.map(m=><div className="member" key={m.user_id}><CircleUserRound/><span><b>{m.username}</b><small>{m.role==="owner"?"所有者":"共享成员"}</small></span></div>):<p className="muted">暂未读取到共享成员。</p>}</div>
-    </div>
-    <div className="member-card teacher-invite-card">
-      <h3>邀请老师 <span>仅学习场景</span></h3>
-      <p>孩子用于学习场景时，家长可在此生成一次性 6 位授权码发给老师。老师免注册、凭码推送便签或作业，不做为独立菜单暴露给所有场景。</p>
-      <div className="connector-actions">
-        <button className="button soft" onClick={()=>setNav("auth")}><KeyRound size={16}/>生成老师邀请码</button>
-      </div>
-      <p className="tt-hint">家庭、养生、办公等场景无需老师参与，不必生成授权码。</p>
     </div>
   </>;
 }

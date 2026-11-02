@@ -25,6 +25,10 @@
 .review-list{display:grid;gap:12px}.review-list article{background:white;border:1px solid #dae0db;border-radius:14px;padding:20px;display:flex;justify-content:space-between;gap:20px}.review-list h3{margin:9px 0}.review-list p{color:#647169}.review-list article>div:last-child{display:flex;gap:8px;align-items:center}.review-list button{border:1px solid #d6ddd8;background:#fff;border-radius:8px;padding:9px 13px}.review-list button.approve{background:#173a2c;color:white;border-color:#173a2c}
 .ghost{border:1px solid #cdd4ce;background:#fff;border-radius:8px;padding:9px 13px;color:#3c5147;font-weight:600;cursor:pointer}
 .app-list button.ghost{background:#fff;color:#3c5147}
+.portal-links{display:flex;gap:20px;align-items:center}
+.portal-links a{color:#315045;text-decoration:none;font-weight:600;font-size:14px}
+.portal-links a:hover{color:#123c2b}
+.creator-head-right{display:flex;align-items:center;gap:18px;flex-wrap:wrap}
 .device-preview-mask{position:fixed;inset:0;background:#0c130fcc;display:grid;place-items:center;z-index:60;padding:24px}
 .device-preview{background:#fff;border-radius:16px;max-width:880px;width:100%;overflow:hidden;box-shadow:0 30px 90px #0008}
 .dp-head{display:flex;align-items:center;gap:12px;padding:16px 20px;border-bottom:1px solid #e7e9e3}

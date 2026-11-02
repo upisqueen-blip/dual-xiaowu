@@ -25,7 +25,11 @@ const nextConfig: NextConfig = {
   basePath: "/admin",
   // Next.js 15+ 默认拦截"跨域"dev 资源（含 HMR WebSocket）。用 127.0.0.1 访问时
   // 会被判定为跨域，导致 /_next/hmr 握手被拒、页面 hydration 永远挂起（一直转圈）。
-  allowedDevOrigins: ["localhost", "127.0.0.1", "192.168.1.4", "192.168.1.5", "192.168.1.69", "192.168.101.69"],
+  // 允许的 dev 来源（仅开发期跨域/HMR 校验用），可用 .env 的 ALLOWED_DEV_ORIGINS 覆盖（逗号分隔）。
+  allowedDevOrigins: (process.env.ALLOWED_DEV_ORIGINS || "localhost,127.0.0.1,192.168.1.4,192.168.1.5,192.168.1.69,192.168.101.69")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
   experimental: {
     // Windows can lock the same prerender segment directory when many build
     // workers create it at once. One worker keeps local/release builds stable.
@@ -34,6 +38,12 @@ const nextConfig: NextConfig = {
   async rewrites() {
     if (!backend) return [];
     return [{ source: "/api/:path*", destination: `${backend}/api/:path*` }];
+  },
+  // basePath 为 /admin 时，直接访问本实例根路径 / 会 404（Next 不会自动补前缀）。
+  // 这里加一条「不受 basePath 影响」的跳转：/ -> /admin，
+  // 避免本地直接开 :8094 看到空白 404，误以为服务没起来 / 门户丢了。
+  async redirects() {
+    return [{ source: "/", destination: "/admin", permanent: false, basePath: false }];
   },
   // HTML 每次回源校验，避免构建后旧 HTML 引用已删除的 chunk（表现「布局全乱」）。
   async headers() {

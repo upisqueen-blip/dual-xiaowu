@@ -37,7 +37,8 @@ start "PC Console 8101" /min /D "%ROOT%\apps\pc-console" cmd /k "npm run dev"
 echo.
 echo  All services started. Three minimized windows are on the taskbar.
 echo    Backend API:        http://localhost:8104
-echo    Content console:    http://localhost:8094  (also http://localhost:8101/admin)
+echo    Content console:    http://localhost:8094/admin  (root "/" auto-redirects to /admin)
+echo                        via portal: http://localhost:8101/admin
 echo    Platform console:   http://localhost:8101
 echo      Creator portal:   http://localhost:8101/
 echo      Ops overview:     http://localhost:8101/center

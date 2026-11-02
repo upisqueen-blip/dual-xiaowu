@@ -7,9 +7,11 @@ export const metadata = {
 };
 
 // 服务端直出：规范内容不依赖浏览器 JS，禁用了脚本也能读到文档。
-const API_ORIGIN = (process.env.XIAOWU_API_BASE || "http://127.0.0.1:8104").replace(/\/$/, "");
+// 与代理一致：只从 .env 的 XIAOWU_API_BASE 读，源码不写死端口。
+const API_ORIGIN = (process.env.XIAOWU_API_BASE || "").trim().replace(/\/$/, "");
 
 async function loadSpec() {
+  if (!API_ORIGIN) return { spec: null, md: "" };
   try {
     const [specRes, mdRes] = await Promise.all([
       fetch(`${API_ORIGIN}/openapi/isv.json`, { cache: "no-store" }),

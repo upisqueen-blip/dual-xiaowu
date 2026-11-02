@@ -11,7 +11,7 @@ import {
 import { api, clearToken, getToken, setToken } from "@/lib/api";
 
 type SceneKey = string;
-type NavKey = "dashboard" | "scenes" | "screens" | "content" | "apps" | "devices" | "members" | "auth" | "profile" | "settings";
+type NavKey = "dashboard" | "scenes" | "screens" | "content" | "apps" | "devices" | "members" | "profile" | "settings";
 type ScreenConfig = { title: string; source: string; refresh: string; modules: string[]; mode?: string; appId?: string };
 type DualWeatherPreview = { city: string; today_temp: string; current_temp?: string; today_desc: string; today_code?: number; today_low: string; today_high: string; today_humidity?: string; today_wind_dir?: string; today_wind_level?: string; sunrise?: string; sunset?: string; advice?: string; forecast?: { day: string; date: string; temp_range: string; desc: string; code?: number }[]; feels_like?: string | number | null };
 type Scene = { name: string; eyebrow: string; desc: string; icon: string; a: ScreenConfig; b: ScreenConfig };
@@ -62,7 +62,6 @@ const navItems: { key: NavKey; label: string; icon: typeof Home }[] = [
   { key: "apps", label: "已上线应用", icon: Boxes },
   { key: "devices", label: "设备管理", icon: Cpu },
   { key: "members", label: "共享成员", icon: Users },
-  { key: "auth", label: "老师授权", icon: KeyRound },
   { key: "profile", label: "个人信息", icon: UserCog },
   { key: "settings", label: "系统配置", icon: Settings2 },
 ];
@@ -244,7 +243,7 @@ export default function DualConsole() {
     clearToken(); setUser(null); setDevices([]); setDeviceMac(""); notify("已退出登录");
   }
 
-  const title = { dashboard: "设备总览", scenes: "场景中心", screens: "双屏配置", content: "内容管理", apps: "已上线应用", devices: "设备管理", members: "共享成员", auth: "老师授权", profile: "个人信息", settings: "系统配置" }[nav];
+  const title = { dashboard: "设备总览", scenes: "场景中心", screens: "双屏配置", content: "内容管理", apps: "已上线应用", devices: "设备管理", members: "共享成员", profile: "个人信息", settings: "系统配置" }[nav];
 
   return (
     <div className="shell">
@@ -283,7 +282,6 @@ export default function DualConsole() {
           {!loading && nav === "apps" ? <PublishedApps onAssign={assignPublishedApp} hasDevice={!!selectedDevice} notify={notify} /> : null}
           {!loading && nav === "devices" ? <DeviceManager devices={devices} user={user} refresh={loadDevices} openAuth={() => setAuthOpen(true)} openPair={() => setPairOpen(true)} notify={notify} choose={(mac) => { setDeviceMac(mac); setNav("screens"); }} /> : null}
           {!loading && nav === "members" ? <MembersPanel device={selectedDevice} user={user} notify={notify} /> : null}
-          {!loading && nav === "auth" ? <TeacherAuthPanel device={selectedDevice} user={user} notify={notify} /> : null}
           {!loading && nav === "profile" ? <ProfilePanel user={user} notify={notify} content={content} setContent={setContent} save={saveConfiguration} apply={applyToDevice} hasDevice={!!selectedDevice} /> : null}
           {!loading && nav === "settings" ? <ServiceConfigPanel user={user} notify={notify} /> : null}
         </div>
