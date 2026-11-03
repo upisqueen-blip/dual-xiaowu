@@ -1327,9 +1327,70 @@ function DeviceManager({ devices, user, refresh, openAuth, openPair, notify, cho
   if (!user) return <EmptyState icon={<ShieldCheck/>} title="登录后管理你的设备" text="这里复用 小悟AI 的账号、设备绑定和所有权体系。" action="登录账号" onAction={openAuth}/>;
   // 平台管理员登录时后端返回全平台设备（role="admin"），页面切到「全平台」视角。
   const adminView = devices.some((d) => d.role === "admin");
+  const [selectedMac, setSelectedMac] = useState<string>("");
+  useEffect(() => { if (!selectedMac && devices[0]) setSelectedMac(devices[0].mac); }, [devices, selectedMac]);
   return <><div className="page-intro row"><div><span className="kicker">DEVICE FLEET</span><h2>设备与绑定</h2><p>{adminView ? "平台管理员视角：展示全平台设备，可直接配置任意设备的内容。" : "绑定关系与原 小悟AI 后台共享，不会创建重复设备。"}</p></div><button className="button primary" onClick={openPair}><Plus size={16}/>绑定设备</button></div>
-    {devices.length === 0 ? <EmptyState icon={<Cpu/>} title="还没有绑定设备" text="输入设备屏幕上的配对码，或使用设备 MAC 地址绑定。" action="绑定第一台设备" onAction={openPair}/> : <div className="device-table"><div className="table-head"><span>设备</span><span>连接状态</span><span>{adminView ? "归属账号" : "角色"}</span><span>最后活动</span><span/></div>{devices.map(d=><div className="device-row" key={d.mac}><div className="device-name"><i><Cpu size={19}/></i><span><b>{d.nickname || "双屏墨水屏"}</b><small>{d.mac}</small></span></div><span className={`status-pill ${d.is_online?"on":""}`}><i/>{d.is_online?"在线":"离线"}</span><span>{adminView ? (d.owner || "未绑定") : (d.role === "owner" ? "所有者" : "共享成员")}</span><span>{d.last_seen || "暂无记录"}</span><div className="row-actions"><button onClick={()=>choose(d.mac)}>配置</button>{adminView ? null : <button className="danger" aria-label="解绑" onClick={()=>void unbind(d)}><Trash2 size={15}/></button>}</div></div>)}</div>}
+    {devices.length === 0 ? <EmptyState icon={<Cpu/>} title="还没有绑定设备" text="输入设备屏幕上的配对码，或使用设备 MAC 地址绑定。" action="绑定第一台设备" onAction={openPair}/> : <div className="device-table"><div className="table-head"><span>设备</span><span>连接状态</span><span>{adminView ? "归属账号" : "角色"}</span><span>最后活动</span><span/></div>{devices.map(d=><div className={"device-row" + (d.mac === selectedMac ? " active" : "")} key={d.mac} onClick={()=>setSelectedMac(d.mac)}><div className="device-name"><i><Cpu size={19}/></i><span><b>{d.nickname || "双屏墨水屏"}</b><small>{d.mac}</small></span></div><span className={`status-pill ${d.is_online?"on":""}`}><i/>{d.is_online?"在线":"离线"}</span><span>{adminView ? (d.owner || "未绑定") : (d.role === "owner" ? "所有者" : "共享成员")}</span><span>{d.last_seen || "暂无记录"}</span><div className="row-actions" onClick={(e)=>e.stopPropagation()}><button onClick={()=>choose(d.mac)}>配置</button>{adminView ? null : <button className="danger" aria-label="解绑" onClick={()=>void unbind(d)}><Trash2 size={15}/></button>}</div></div>)}    </div>}
+    {selectedMac ? <DeviceTfCard mac={selectedMac} /> : null}
   </>;
+}
+
+function DeviceTfCard({ mac }: { mac: string }) {
+  const [storage, setStorage] = useState<{
+    mounted?: boolean; status?: string; total_mb?: number; free_mb?: number;
+    categories?: Record<string, string[]>;
+  } | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState("");
+  const refresh = useCallback(async () => {
+    if (!mac) return;
+    setLoading(true); setErr("");
+    try {
+      const r = await api<{ storage: any }>(`/api/device/${encodeURIComponent(mac)}/storage`);
+      setStorage(r.storage || null);
+    } catch (e) { setErr((e as Error).message); }
+    finally { setLoading(false); }
+  }, [mac]);
+  useEffect(() => { void refresh(); }, [refresh]);
+  const cats = storage?.categories || {};
+  const meta: { label: string; key: string }[] = [
+    { label: "照片", key: "images" },
+    { label: "音频", key: "audio" },
+    { label: "小说", key: "books" },
+    { label: "录音", key: "recordings" },
+  ];
+  return (
+    <div className="tf-card-panel">
+      <div className="page-intro row">
+        <div><span className="kicker">LOCAL TF CARD</span><h2>{mac} · 本地 TF 卡</h2>
+          <p>设备在 <code>/xiaowu</code> 下自动建目录：images（照片）、audio（音频）、books（小说 md/txt）、recordings（本地录音）。</p></div>
+        <button className="button soft" disabled={loading} onClick={() => void refresh()}>{loading ? "刷新中…" : "刷新"}</button>
+      </div>
+      {err ? <p className="tt-empty">{err}</p> : null}
+      {!loading && !storage ? <div className="tt-empty">暂无 TF 卡上报数据。设备插卡并联网后会自动上报；若长期为空，请确认已插入 FAT32 格式 TF 卡（暂不支持 exFAT）。</div> : null}
+      {storage ? (
+        <>
+          <div className="tf-status">
+            <span className={`status-pill ${storage.mounted ? "on" : ""}`}><i/>{storage.mounted ? "已挂载" : "未挂载"}</span>
+            {storage.total_mb != null ? <span>总容量 {storage.total_mb} MB · 可用 {storage.free_mb ?? "?"} MB</span> : null}
+            {storage.status ? <small>{storage.status}</small> : null}
+          </div>
+          <div className="tf-grid">
+            {meta.map((m) => {
+              const files = cats[m.key] || [];
+              return (
+                <div className="tf-cell" key={m.key}>
+                  <h4>{m.label} <span>{files.length}</span></h4>
+                  {files.length ? <ul>{files.slice(0, 30).map((f, i) => <li key={i}>{f}</li>)}</ul>
+                    : <p className="muted">空</p>}
+                </div>
+              );
+            })}
+          </div>
+        </>
+      ) : null}
+    </div>
+  );
 }
 
 function MembersPanel({ device, user, notify }: { device?: Device; user: User|null; notify:(m:string)=>void }) {
@@ -2255,7 +2316,7 @@ type ContentTab = "course" | "messages" | "notes" | "homework" | "reading" | "al
 
 // 内容 tabs 随场景联动：理财场景直接给自选股 / 推荐股 / 资金管理，不再混入作业、缴费等学习家庭模块
 const CONTENT_TABS_BY_SCENE: Record<SceneKey, ContentTab[]> = {
-  family: ["notes", "bills", "express", "schedule", "shopping", "anniversaries", "messages", "history"],
+  family: ["notes", "bills", "express", "schedule", "shopping", "anniversaries", "messages", "album", "history"],
   study: ["course", "messages", "notes", "homework", "reading", "album", "history"],
   finance: ["watchlist", "reco", "portfolio", "gold", "history"],
   health: ["notes", "messages", "history"],
