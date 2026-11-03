@@ -706,87 +706,200 @@ def render_scene_modules(title: str, modules: list, w: int, h: int, colors: int,
     return img
 
 
+def _weather_kind(desc, code) -> str:
+    """把天气文案/编码映射成线稿图标类型：sun/cloud/rain/partly。"""
+    d = str(desc)
+    try:
+        c = int(code)
+    except (TypeError, ValueError):
+        c = -1
+    if "雨" in d or c >= 50:
+        return "rain"
+    if "晴" in d and "云" in d:
+        return "partly"
+    if "晴" in d:
+        return "sun"
+    return "cloud"
+
+
+def _draw_weather_icon(draw, kind, x, y, size, fg=0):
+    """三色墨水屏适用的极简线稿天气图标（黑色描边，无填充，避免灰阶）。"""
+    import math
+    lw = max(1, int(size / 20))
+    if kind in ("cloud", "rain", "partly"):
+        cy = y + size * (0.64 if kind == "partly" else 0.56)
+        draw.line([(x + size * 0.12, cy), (x + size * 0.88, cy)], fill=fg, width=lw)
+        draw.ellipse([x + size * 0.08, cy - size * 0.30, x + size * 0.40, cy + size * 0.02], outline=fg, width=lw)
+        draw.ellipse([x + size * 0.32, cy - size * 0.42, x + size * 0.74, cy - size * 0.04], outline=fg, width=lw)
+        draw.ellipse([x + size * 0.56, cy - size * 0.28, x + size * 0.92, cy + size * 0.04], outline=fg, width=lw)
+    if kind in ("sun", "partly"):
+        sx = x + size * 0.30 if kind == "partly" else x + size * 0.5
+        sy = y + size * 0.26 if kind == "partly" else y + size * 0.5
+        r = size * (0.13 if kind == "partly" else 0.20)
+        draw.ellipse([sx - r, sy - r, sx + r, sy + r], outline=fg, width=lw)
+        for deg in range(0, 360, 45):
+            a = math.radians(deg)
+            x1 = sx + (r + size * 0.05) * math.cos(a)
+            y1 = sy + (r + size * 0.05) * math.sin(a)
+            x2 = sx + (r + size * 0.18) * math.cos(a)
+            y2 = sy + (r + size * 0.18) * math.sin(a)
+            draw.line([(x1, y1), (x2, y2)], fill=fg, width=lw)
+    if kind == "rain":
+        cy = y + size * 0.56
+        for i in range(3):
+            rx0 = x + size * (0.30 + i * 0.18)
+            draw.line([(rx0, cy + size * 0.08), (rx0 - size * 0.06, cy + size * 0.28)], fill=fg, width=lw)
+
+
 def render_weather(weather: dict, w: int, h: int, colors: int) -> Image.Image:
-    """渲染天气卡片（B 屏默认展示成都天气，也可由后台「天气」模式显式选择）。
+    """渲染成都天气卡片（B 屏默认，三色墨水屏：黑/白/黄强调色）。
 
-    数据来自 console_api._weather_payload（当前为演示数据，接入真实天气源时
-    只需替换该函数，本渲染器无需改动）。
+    布局对齐后台设计稿：顶部城市 + 「天气」+ 节气黄标，中部左温区右日期
+    （竖线分隔），三日预报，底部温馨提示与日出日落，页脚小悟AI·实时。
+    数据来自 console_api._weather_payload（演示数据，替换该函数即可接真实源）。
     """
-    scale = w / 400.0
-    img = _palette_p_image(w, h, colors) if colors >= 3 else Image.new("1", (w, h), 1)
+    s = w / 400.0
+    is_color = colors >= 3
+    img = _palette_p_image(w, h, colors) if is_color else Image.new("1", (w, h), 1)
     draw = ImageDraw.Draw(img)
-    fg = 0
-    pad = int(14 * scale)
-    font_city = _load_cjk(max(18, int(24 * scale)))
-    font_temp = _load_cjk(max(30, int(46 * scale)))
-    font_desc = _load_cjk(max(14, int(18 * scale)))
-    font_meta = _load_cjk(max(11, int(14 * scale)))
-    font_fc = _load_cjk(max(10, int(13 * scale)))
+    fg = 0          # 黑
+    wht = 1         # 白
+    acc = 2 if is_color else 0   # 三色第3色：colors>=4 黄，==3 红
+    pad = int(14 * s)
 
-    city = str(weather.get("city") or "成都")
+    f_city = _load_cjk(max(20, int(26 * s)))
+    f_pin = _load_cjk(max(9, int(11 * s)))
+    f_temp = _load_cjk(max(34, int(48 * s)))
+    f_desc = _load_cjk(max(13, int(17 * s)))
+    f_meta = _load_cjk(max(10, int(12 * s)))
+    f_big = _load_cjk(max(28, int(34 * s)))
+    f_sm = _load_cjk(max(9, int(11 * s)))
+    f_fc = _load_cjk(max(9, int(11 * s)))
+
     now = datetime.now()
-    date_str = now.strftime("%m月%d日")
-    weekday = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][now.weekday()]
+    city = str(weather.get("city") or "成都")
+    pinyin = str(weather.get("city_pinyin") or "")
+    solar = "{} · 第{}天".format(weather.get("solar_term") or "—", weather.get("solar_term_day") or "1")
     cur = str(weather.get("current_temp") or "--")
-    desc = str(weather.get("today_desc") or weather.get("description") or "晴")
+    desc = str(weather.get("today_desc") or "晴")
+    feels = str(weather.get("feels_like") or "--")
     low = str(weather.get("today_low") or "--")
     high = str(weather.get("today_high") or "--")
-    wind = f"{weather.get('today_wind_dir') or ''} {weather.get('today_wind_level') or ''}".strip()
     humidity = str(weather.get("today_humidity") or "")
+    wind = f"{weather.get('today_wind_dir') or ''} {weather.get('today_wind_level') or ''}".strip()
+    plate = str(weather.get("plate_limit") or "不限行")
     advice = str(weather.get("advice") or "")
-    plate = str(weather.get("plate_limit") or "")
+    sunrise = str(weather.get("sunrise") or "--:--")
+    sunset = str(weather.get("sunset") or "--:--")
+    lunar_date = str(weather.get("lunar_date") or "")
+    lunar_year = str(weather.get("lunar_year") or "")
+    zodiac = str(weather.get("lunar_zodiac") or "")
+    weekday_cn = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][now.weekday()]
+    week_of_month = (now.day - 1) // 7 + 1
+    day_num = str(now.day)
+    date_label = f"{now.year}年{now.month}月"
+    updated = str(weather.get("updated_at") or now.strftime("%Y-%m-%d %H:%M"))
 
-    # 顶部：城市 + 日期/星期
-    draw.text((pad, int(10 * scale)), city, fill=fg, font=font_city)
-    date_w = _text_w(draw, f"{date_str} {weekday}", font_meta)
-    draw.text((w - pad - date_w, int(18 * scale)), f"{date_str} {weekday}", fill=fg, font=font_meta)
+    # ---- 顶部：城市 + 「天气」+ 节气黄标 ----
+    draw.text((pad, int(8 * s)), city, fill=fg, font=f_city)
+    if pinyin:
+        draw.text((pad, int(8 * s) + f_city.size), pinyin, fill=fg, font=f_pin)
+    st_w = _text_w(draw, solar, f_meta) + int(16 * s)
+    st_x = w - pad - st_w
+    draw.text((st_x - _text_w(draw, "天气", f_desc) - int(8 * s), int(10 * s)), "天气", fill=fg, font=f_desc)
+    draw.rectangle([st_x, int(10 * s), st_x + st_w, int(10 * s) + int(20 * s)], fill=acc)
+    draw.text((st_x + int(8 * s), int(13 * s)), solar, fill=fg, font=f_meta)
+    draw.line([(pad, int(46 * s)), (w - pad, int(46 * s))], fill=fg, width=max(1, int(2 * s)))
 
-    # 主温区：大号当前温度 + 右侧天气描述/高低温
-    top = int(50 * scale)
-    draw.text((pad, top), cur, fill=fg, font=font_temp)
-    temp_w = _text_w(draw, cur, font_temp)
-    rx = pad + temp_w + int(16 * scale)
-    draw.text((rx, top + int(10 * scale)), desc, fill=fg, font=font_desc)
-    draw.text((rx, top + int(36 * scale)), f"{low} ~ {high}", fill=fg, font=font_meta)
+    # ---- 中部：左温区 / 右日期（竖线分隔）----
+    y_top = int(54 * s)
+    vx = int(200 * s)
+    draw.line([(vx, y_top), (vx, int(186 * s))], fill=fg, width=max(1, int(1.5 * s)))
 
-    # 分隔线
-    y_line = top + int(58 * scale)
-    draw.line([(pad, y_line), (w - pad, y_line)], fill=fg, width=max(1, int(2 * scale)))
-
-    # 中间信息行：风 / 湿度 / 限行
-    y_meta = y_line + int(10 * scale)
-    meta_bits = []
-    if wind:
-        meta_bits.append(f"风 {wind}")
+    # 左：大温度 + 描述 + 体感/湿度/风力 + 雨云图标
+    draw.text((pad, y_top), cur, fill=fg, font=f_temp)
+    tw = _text_w(draw, cur, f_temp)
+    draw.text((pad + tw + int(14 * s), y_top + int(8 * s)), desc, fill=fg, font=f_desc)
+    _draw_weather_icon(draw, _weather_kind(desc, weather.get("today_code")),
+                       vx - int(54 * s), y_top, int(50 * s), fg)
+    meta_left = []
+    if feels:
+        meta_left.append(f"体感 {feels}")
     if humidity:
-        meta_bits.append(f"湿度 {humidity}")
-    if plate:
-        meta_bits.append(f"限行 {plate}")
-    draw.text((pad, y_meta), "  ·  ".join(meta_bits)[:30], fill=fg, font=font_meta)
+        meta_left.append(f"湿度 {humidity}")
+    if wind:
+        meta_left.append(f"风力 {wind}")
+    for i, m in enumerate(meta_left):
+        draw.text((pad, y_top + int(54 * s) + i * int(16 * s)), m, fill=fg, font=f_meta)
 
-    # 温馨提示
-    y_advice = y_meta + int(28 * scale)
-    advice_text = ("温馨提示：" + advice) if advice else ""
-    if advice_text:
-        draw.text((pad, y_advice), advice_text[:40], fill=fg, font=font_meta)
+    # 右：日期块
+    rx = vx + int(14 * s)
+    draw.text((rx, y_top), f"{date_label} · 第{week_of_month}周", fill=fg, font=f_meta)
+    draw.text((rx, y_top + int(18 * s)), day_num, fill=fg, font=f_big)
+    rw = _text_w(draw, day_num, f_big)
+    draw.text((rx + rw + int(8 * s), y_top + int(34 * s)), weekday_cn, fill=fg, font=f_meta)
+    yy = y_top + int(56 * s)
+    if lunar_date:
+        draw.text((rx, yy), lunar_date, fill=fg, font=f_meta)
+    if lunar_year or zodiac:
+        draw.text((rx, yy + int(16 * s)), f"{lunar_year} / {zodiac}", fill=fg, font=f_sm)
+    sy = yy + int(34 * s)
+    sl_w = _text_w(draw, solar, f_sm) + int(14 * s)
+    draw.rectangle([rx, sy, rx + sl_w, sy + int(16 * s)], fill=acc)
+    draw.text((rx + int(7 * s), sy + int(1 * s)), solar, fill=fg, font=f_sm)
+    by = sy + int(24 * s)
+    plate_txt = f"限行 {plate}"
+    pb_w = _text_w(draw, plate_txt, f_sm) + int(14 * s)
+    draw.rectangle([rx, by, rx + pb_w, by + int(16 * s)], fill=fg)
+    draw.text((rx + int(7 * s), by + int(1 * s)), plate_txt, fill=wht, font=f_sm)
 
-    # 底部三日预报
-    y_fc = y_advice + int(30 * scale)
+    # ---- 三日预报 ----
+    y_fc = int(196 * s)
+    draw.text((pad, y_fc), "三日天气 · 最高/最低/℃", fill=fg, font=f_meta)
+    y_cells = y_fc + int(16 * s)
+    cell_h = int(44 * s)
+    inner_w = w - 2 * pad
+    n = 3
+    gap = int(6 * s)
+    cw = (inner_w - gap * (n - 1)) // n
     fc = weather.get("forecast") or []
-    if fc:
-        draw.line([(pad, y_fc - int(6 * scale)), (w - pad, y_fc - int(6 * scale))], fill=fg, width=1)
-        n = min(len(fc), 3)
-        col_w = (w - 2 * pad) // max(1, n)
-        for i, item in enumerate(fc[:n]):
-            cx = pad + col_w * i
-            day = str(item.get("day") or "")
-            rng = str(item.get("temp_range") or "")
-            d = str(item.get("desc") or "")
-            draw.text((cx, y_fc), day, fill=fg, font=font_fc)
-            draw.text((cx, y_fc + int(16 * scale)), rng, fill=fg, font=font_fc)
-            draw.text((cx, y_fc + int(32 * scale)), d, fill=fg, font=font_fc)
-    else:
-        draw.text((pad, y_fc), "暂无预报数据", fill=fg, font=font_meta)
+    icon_size = int(22 * s)
+    for i in range(n):
+        cx = pad + i * (cw + gap)
+        draw.rectangle([cx, y_cells, cx + cw, y_cells + cell_h], outline=fg, width=max(1, int(1.5 * s)))
+        item = fc[i] if i < len(fc) else {}
+        d = str(item.get("day") or "")
+        dt = str(item.get("date") or "")
+        rng = str(item.get("temp_range") or "")
+        dd = str(item.get("desc") or "")
+        draw.text((cx + int(6 * s), y_cells + int(3 * s)), f"{d} {dt}", fill=fg, font=f_fc)
+        draw.text((cx + int(6 * s), y_cells + int(20 * s)), dd, fill=fg, font=f_fc)
+        draw.text((cx + int(6 * s), y_cells + int(33 * s)), rng, fill=fg, font=f_fc)
+        # 图标固定在单元格右上角，左侧三行文本独立成列，避免与温度文字碰触
+        _draw_weather_icon(draw, _weather_kind(dd, item.get("code")),
+                           cx + cw - icon_size - int(4 * s), y_cells + int(4 * s), icon_size, fg)
+
+    # ---- 底部：温馨提示 + 日出日落 ----
+    y_bot = y_cells + cell_h + int(8 * s)
+    tip_core = advice if advice else "今日天气平和"
+    tb_w = _text_w(draw, "温馨提示", f_sm) + int(12 * s)
+    draw.rectangle([pad, y_bot, pad + tb_w, y_bot + int(18 * s)], fill=fg)
+    draw.text((pad + int(6 * s), y_bot + int(2 * s)), "温馨提示", fill=wht, font=f_sm)
+    # 先确定右侧「日出/日落」位置，再限制左侧提示文案宽度，避免两行相撞/裁切
+    sr = f"日出 {sunrise}  日落 {sunset}"
+    sr_w = _text_w(draw, sr, f_sm)
+    sr_x = w - pad - sr_w
+    tip_x = pad + tb_w + int(8 * s)
+    max_tip_w = max(int(20 * s), sr_x - tip_x - int(8 * s))
+    draw.text((tip_x, y_bot + int(2 * s)),
+              _ellipsis_text(draw, tip_core, f_sm, max_tip_w), fill=fg, font=f_sm)
+    draw.text((sr_x, y_bot + int(2 * s)), sr, fill=fg, font=f_sm)
+
+    # ---- 页脚 ----
+    y_foot = y_bot + int(24 * s)
+    draw.line([(pad, y_foot - int(4 * s)), (w - pad, y_foot - int(4 * s))], fill=fg, width=1)
+    draw.text((pad, y_foot), f"天气预报 · {updated}", fill=fg, font=f_pin)
+    draw.text((w - pad - _text_w(draw, "小悟AI · 实时", f_pin), y_foot), "小悟AI · 实时", fill=fg, font=f_pin)
     return img
 
 
