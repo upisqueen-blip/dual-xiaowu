@@ -1156,7 +1156,7 @@ bool InkSightClient::ReportStorage(NetworkInterface* network,
     http->SetKeepAlive(false);
     http->SetHeader("Content-Type", "application/json");
     http->SetHeader("X-Device-Token", token);
-    http->SetContent(snapshot_json);
+    http->SetContent(std::string(snapshot_json));
     const std::string url = NormalizeServer(server) + "/api/device/" + device_id + "/storage";
     if (!http->Open("POST", url)) {
         if (error) *error = "connect failed";
