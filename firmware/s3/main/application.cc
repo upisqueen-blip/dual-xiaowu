@@ -706,9 +706,15 @@ void Application::ShowActivationCode(const std::string& code, const std::string&
         digit_sound{'9', Lang::Sounds::OGG_9}
     }};
 
+    // 在服务器下发的激活文案前加上 xiaozhi.me 绑定引导，确保用户知道去哪输入激活码。
+    std::string full_message = "打开 xiaozhi.me，激活小智对话";
+    if (!message.empty()) {
+        full_message += "\n\n";
+        full_message += message;
+    }
     // This sentence uses 9KB of SRAM, so we need to wait for it to finish
-    Alert(Lang::Strings::ACTIVATION, message.c_str(), "link", Lang::Sounds::OGG_ACTIVATION);
-    Board::GetInstance().GetDisplay()->ShowActivationUi(message.c_str(), code.c_str());
+    Alert(Lang::Strings::ACTIVATION, full_message.c_str(), "link", Lang::Sounds::OGG_ACTIVATION);
+    Board::GetInstance().GetDisplay()->ShowActivationUi(full_message.c_str(), code.c_str());
 
     for (const auto& digit : code) {
         auto it = std::find_if(digit_sounds.begin(), digit_sounds.end(),

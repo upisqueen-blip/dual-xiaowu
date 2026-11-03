@@ -21,8 +21,6 @@ public:
 
     // ChipID = 从 eFuse MAC 地址构造的唯一 48 位整数
     static uint64_t GetChipId();
-    // 激活码 = ((ChipID / 200000) + 291954035) / 3
-    static uint32_t ComputeActivationCode();
 };
 
 #endif // _SYSTEM_INFO_H_

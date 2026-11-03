@@ -60,16 +60,6 @@ uint64_t SystemInfo::GetChipId() {
     return chip_id;
 }
 
-uint32_t SystemInfo::ComputeActivationCode() {
-    uint64_t chip_id = GetChipId();
-    // 激活码 = ((ChipID 整除 200000) + 291954035) 整除 3
-    uint64_t step1 = chip_id / 200000;
-    uint64_t step2 = step1 + 291954035ULL;
-    uint32_t code = (uint32_t)(step2 / 3);
-    ESP_LOGI(TAG, "ChipID=%llu, activation code=%u", (unsigned long long)chip_id, code);
-    return code;
-}
-
 std::string SystemInfo::GetUserAgent() {
     auto app_desc = esp_app_get_description();
     auto user_agent = std::string(BOARD_NAME "/") + app_desc->version;

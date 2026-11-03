@@ -188,51 +188,24 @@ void WifiBoard::StartWifiConfigMode() {
     Application::GetInstance().Schedule([&wifi_manager]() {
         auto& app = Application::GetInstance();
 
-        // 生成激活码并语音播报
-        uint32_t code = SystemInfo::ComputeActivationCode();
-        char code_str[16];
-        snprintf(code_str, sizeof(code_str), "%lu", (unsigned long)code);
-
         // 墨水屏全刷要几十秒，先把热点信息打到串口，方便立刻拿到配网地址。
-        ESP_LOGI(TAG, "WiFi config AP: ssid=%s url=%s code=%s",
-                 wifi_manager.GetApSsid().c_str(), wifi_manager.GetApWebUrl().c_str(),
-                 code_str);
+        ESP_LOGI(TAG, "WiFi config AP: ssid=%s url=%s",
+                 wifi_manager.GetApSsid().c_str(), wifi_manager.GetApWebUrl().c_str());
 
-        // 屏幕显示：热点名 + 控制面板地址 + 激活码
+        // 屏幕显示：热点名 + 控制面板地址。
+        // 注意：激活码由 xiaozhi.me 服务器在联网后下发（6 位），此处尚未联网，
+        // 不能显示本地生成的假码（小智不认）。配网成功后屏幕会自动切换到绑定页并显示真码。
         std::string hint = Lang::Strings::CONNECT_TO_HOTSPOT;
         hint += wifi_manager.GetApSsid();
         hint += "\n";
         hint += Lang::Strings::ACCESS_VIA_BROWSER;
         hint += wifi_manager.GetApWebUrl();
+        hint += "\n\n配网成功后屏幕将显示 6 位激活码，\n打开 xiaozhi.me 输入即可绑定小智对话";
         app.Alert(Lang::Strings::WIFI_CONFIG_MODE, hint.c_str(), "gear", Lang::Sounds::OGG_WIFICONFIG);
         // E-paper needs a persistent, dedicated provisioning page. A regular
         // Alert only updates transient LCD/chat widgets and leaves the
         // dashboard home page visible.
-        Board::GetInstance().GetDisplay()->ShowActivationUi(hint.c_str(), code_str);
-
-        // 语音播报激活码数字（复用 ShowActivationCode 的数字音效）
-        app.Schedule([code_str]() {
-            auto& app_inner = Application::GetInstance();
-            for (char c : code_str) {
-                if (c >= '0' && c <= '9') {
-                    // lang_config.h 里 OGG_0~OGG_9 是数字音效
-                    std::string_view sound = Lang::Sounds::OGG_0;
-                    switch (c) {
-                        case '0': sound = Lang::Sounds::OGG_0; break;
-                        case '1': sound = Lang::Sounds::OGG_1; break;
-                        case '2': sound = Lang::Sounds::OGG_2; break;
-                        case '3': sound = Lang::Sounds::OGG_3; break;
-                        case '4': sound = Lang::Sounds::OGG_4; break;
-                        case '5': sound = Lang::Sounds::OGG_5; break;
-                        case '6': sound = Lang::Sounds::OGG_6; break;
-                        case '7': sound = Lang::Sounds::OGG_7; break;
-                        case '8': sound = Lang::Sounds::OGG_8; break;
-                        case '9': sound = Lang::Sounds::OGG_9; break;
-                    }
-                    app_inner.PlaySound(sound);
-                }
-            }
-        });
+        Board::GetInstance().GetDisplay()->ShowActivationUi(hint.c_str(), "");
     });
 #elif CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
     auto &blufi = Blufi::GetInstance();
