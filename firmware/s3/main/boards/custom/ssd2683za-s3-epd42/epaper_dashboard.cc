@@ -1398,5 +1398,5 @@ void EpaperDashboard::SetInkSightFooter(std::string footer) {
     // 物理刷新。否则差分刷新会把标题栏+页脚重新叠加到服务器渲染的画面上
     //（表现为看板刷两下后又被 LVGL 边框覆盖）。
     inksight_footer_ = std::move(footer);
-    ESP_LOGI(kDashboardTag, "InkSight: %s", inksight_footer_.c_str());
+    ESP_LOGI(kDashboardTag, "XiaowuAI: %s", inksight_footer_.c_str());
 }

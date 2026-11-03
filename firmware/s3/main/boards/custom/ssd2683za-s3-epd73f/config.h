@@ -109,10 +109,11 @@
 // InkSight /api/render backend。留空则运行时用 MCP 工具
 // self.epaper.set_inksight_server(...) 配置；也可在此填默认值。
 // ---------------------------------------------------------------------------
-// 后端主地址 = 8091（已用浏览器模拟 token/heartbeat/runtime/state 验证）。
-// 用 MCP 工具 self.epaper.set_inksight_server 可运行时改并写入 NVS。
+// 后端主地址 = 线上域名（门户反代到 FastAPI，/health 与 /api/render 均可用）。
+// 本地联调时改成 http://<电脑 LAN IP>:8092，或用 MCP 工具
+// self.epaper.set_inksight_server 运行时改（会写入 NVS）。
 #ifndef INKSIGHT_DEFAULT_SERVER_URL
-#  define INKSIGHT_DEFAULT_SERVER_URL  "http://nas.insane.vip:8091"
+#  define INKSIGHT_DEFAULT_SERVER_URL  "https://dual.xiaowuai.vip/backend"
 #endif
 
 // 主地址连不上时自动回退一次的备用地址。留空则关闭回退。

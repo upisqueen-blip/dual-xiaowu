@@ -855,7 +855,7 @@ private:
                     });
         mcp.AddTool("self.epaper.set_inksight_server",
                     "设置 InkSight 后端地址（今日看板画面来源）。参数 url 形如 "
-                    "http://nas.insane.vip:8090 （不要带 /api/render 后缀）。"
+                    "https://dual.xiaowuai.vip/backend （不要带 /api/render 后缀）。"
                     "设置后会立即用新地址刷新一次看板。",
                     PropertyList({Property("url", kPropertyTypeString)}),
                     [this](const PropertyList& properties) -> ReturnValue {
@@ -1007,7 +1007,7 @@ public:
             if (inksight_server_.empty()) {
                 ESP_LOGW(kTag, "InkSight server not set — use MCP "
                                "self.epaper.set_inksight_server to configure, "
-                               "e.g. http://nas.insane.vip:8090");
+                               "e.g. https://dual.xiaowuai.vip/backend");
             } else {
                 ESP_LOGI(kTag, "InkSight server from compile-time default: %s",
                          inksight_server_.c_str());

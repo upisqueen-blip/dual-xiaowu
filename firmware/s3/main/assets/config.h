@@ -103,11 +103,11 @@
 // ---------------------------------------------------------------------------
 // InkSight /api/render backend. Leave empty to configure at runtime via
 // the self.epaper.set_inksight_server(...) MCP tool. Otherwise fill with a
-// reachable base URL, e.g. "http://nas.insane.vip:8090" (no trailing slash,
-// no /api/... suffix). The runtime MCP setting overrides this macro.
+// reachable base URL, e.g. "https://dual.xiaowuai.vip/backend" (no trailing
+// slash, no /api/... suffix). The runtime MCP setting overrides this macro.
 // ---------------------------------------------------------------------------
 #ifndef INKSIGHT_DEFAULT_SERVER_URL
-#  define INKSIGHT_DEFAULT_SERVER_URL  "http://nas.insane.vip:8090"
+#  define INKSIGHT_DEFAULT_SERVER_URL  "https://dual.xiaowuai.vip/backend"
 #endif
 
 // Restricted credential accepted only by the product backend's LightAcade

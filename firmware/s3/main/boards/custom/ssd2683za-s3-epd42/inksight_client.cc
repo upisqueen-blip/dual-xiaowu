@@ -5,18 +5,21 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <string>
 #include <vector>
 
 #include <esp_heap_caps.h>
 #include <esp_log.h>
+#include <esp_netif_sntp.h>
+#include <freertos/FreeRTOS.h>
 #include <http.h>
 #include <network_interface.h>
 #include <settings.h>
 #include <cJSON.h>
 
 namespace {
-constexpr char kTag[] = "InkSight";
+constexpr char kTag[] = "XiaowuAI";
 
 std::string NormalizeServer(std::string server) {
     while (!server.empty() && server.back() == '/') server.pop_back();
@@ -310,7 +313,7 @@ bool InkSightClient::Load(NetworkInterface* network,
         return false;
     }
     if (server.empty()) {
-        error = "InkSight server URL not set";
+        error = "XiaowuAI server URL not set";
         return false;
     }
 
@@ -321,7 +324,7 @@ bool InkSightClient::Load(NetworkInterface* network,
     url += std::to_string(kWidth);
     url += "&h=";
     url += std::to_string(kHeight);
-    url += "&v=3.2";
+    url += "&v=3.2&screen=A";
     if (!device_id.empty()) url += "&mac=" + device_id;
     if (battery_percent >= 0) {
         url += "&bat=" + std::to_string(battery_percent);
@@ -374,7 +377,7 @@ bool InkSightClient::Load(NetworkInterface* network,
             // 250ms * 2^(attempt-1): 250,500,1000,2000 ms
             const int delay_ms = 250 * (1 << (attempt - 1));
             ESP_LOGW(kTag,
-                     "InkSight retry %d/%d after %d ms "
+                     "XiaowuAI retry %d/%d after %d ms "
                      "(tcp_err=%d http=%d stream_err=%d rows=%d/%d got=%u)",
                      attempt, kMaxAttempts - 1, delay_ms,
                      last_tcp_err, last_http_code,
@@ -416,7 +419,7 @@ bool InkSightClient::Load(NetworkInterface* network,
             if (code == 401 && attempt + 1 < kMaxAttempts &&
                 !device_token.empty()) {
                 ESP_LOGW(kTag,
-                         "InkSight render rejected cached token (HTTP 401); reprovisioning");
+                         "XiaowuAI render rejected cached token (HTTP 401); reprovisioning");
                 InvalidateDeviceToken(server, device_id, device_token);
                 device_token = DeviceToken(network, server, device_id);
                 continue;
@@ -708,7 +711,35 @@ bool InkSightClient::ProbeServerHealth(NetworkInterface* network,
     return status >= 200 && status < 400;
 }
 
+void InkSightClient::EnsureClockForTls() {
+    static bool done = false;
+    if (done) return;
+    // 2023-11-14 之后的时间视为有效；S3 无电池 RTC，冷启动通常是 1970。
+    if (time(nullptr) > static_cast<time_t>(1700000000)) {
+        done = true;
+        return;
+    }
+    ESP_LOGI(kTag, "clock not set, syncing SNTP before HTTPS...");
+    esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG("ntp.aliyun.com");
+    if (esp_netif_sntp_init(&cfg) != ESP_OK) {
+        ESP_LOGW(kTag, "SNTP init failed, HTTPS may reject certs");
+        return;
+    }
+    // 有界等待，避免离线时把开机流程卡死。
+    const esp_err_t err = esp_netif_sntp_sync_wait(pdMS_TO_TICKS(6000));
+    esp_netif_sntp_deinit();
+    done = (err == ESP_OK);
+    if (done) {
+        ESP_LOGI(kTag, "clock synced, HTTPS ready");
+    } else {
+        ESP_LOGW(kTag, "SNTP timeout, continuing (HTTPS may fail until retry)");
+    }
+}
+
 std::string InkSightClient::ResolveServerUrl(NetworkInterface* network) {
+    // 线上后端是 HTTPS：先确保系统时间有效，否则 mbedtls 会以证书
+    // Not-Before 校验失败（-76）拒绝握手，表现为「选路全部不可达」。
+    if (network) EnsureClockForTls();
     // 1) NVS 手工覆盖：仅当当前可达才优先使用（避免旧办公点地址卡死）。
     const std::string manual = LoadServerUrl();
     if (!manual.empty() && ProbeServerHealth(network, manual)) {
@@ -759,7 +790,7 @@ bool InkSightClient::Load2bpp(NetworkInterface* network,
         return false;
     }
     if (server.empty()) {
-        error = "InkSight server URL not set";
+        error = "XiaowuAI server URL not set";
         return false;
     }
 
@@ -773,6 +804,9 @@ bool InkSightClient::Load2bpp(NetworkInterface* network,
     // 3 色面板（BWR）请求 colors=3，后端据此把高亮文字画成白色（红底白字），
     // 否则红字落在红底上看不清；4 色面板（BWRY）仍请求 colors=4（黄底红字）。
     url += "&v=3.2&bpp=2&colors=" + std::to_string(FPC2_COLOR_COUNT);
+    // 显式声明这是 B 屏裸帧请求：后端早年靠 persona==DUAL_B 判断裸帧，persona
+    // 默认空串时会给回 BMP（15662 字节），被当成 30000 字节裸帧解析 → 屏幕一片红。
+    url += "&screen=B";
     if (!device_id.empty()) url += "&mac=" + device_id;
     if (!persona.empty()) {
         url += "&persona=";
@@ -815,7 +849,7 @@ bool InkSightClient::Load2bpp(NetworkInterface* network,
     for (int attempt = 0; attempt < kMaxAttempts && !ok; ++attempt) {
         if (attempt > 0) {
             const int delay_ms = 250 * (1 << (attempt - 1));
-            ESP_LOGW(kTag, "InkSight 2bpp retry %d/%d after %d ms",
+            ESP_LOGW(kTag, "XiaowuAI 2bpp retry %d/%d after %d ms",
                      attempt, kMaxAttempts - 1, delay_ms);
             vTaskDelay(pdMS_TO_TICKS(delay_ms));
         }
@@ -845,7 +879,7 @@ bool InkSightClient::Load2bpp(NetworkInterface* network,
             if (code == 401 && attempt + 1 < kMaxAttempts &&
                 !device_token.empty()) {
                 ESP_LOGW(kTag,
-                         "InkSight 2bpp render rejected cached token (HTTP 401); reprovisioning");
+                         "XiaowuAI 2bpp render rejected cached token (HTTP 401); reprovisioning");
                 InvalidateDeviceToken(server, device_id, device_token);
                 device_token = DeviceToken(network, server, device_id);
                 continue;
@@ -854,6 +888,13 @@ bool InkSightClient::Load2bpp(NetworkInterface* network,
             char buf[64];
             std::snprintf(buf, sizeof(buf), "HTTP %d", code);
             error = buf;
+            break;
+        }
+        // 彩色屏只认裸帧。若后端仍返回 BMP（server 端 screen 判定错），直接失败，
+        // 否则 BMP 字节会被当成 2bpp 裸帧刷屏，表现为整屏一片红。
+        if (http->GetResponseHeader("Content-Type").find("image/bmp") !=
+            std::string::npos) {
+            error = "服务器给的是BMP不是裸帧";
             break;
         }
         ReadRefreshHeader(http.get(), server_refresh_minutes);
@@ -923,7 +964,7 @@ bool InkSightClient::Load2bpp(NetworkInterface* network,
         }
         ok = true;
         if (device_unbound_out) *device_unbound_out = device_unbound;
-        ESP_LOGI(kTag, "InkSight render identity: mac=%s state=%s",
+        ESP_LOGI(kTag, "XiaowuAI render identity: mac=%s state=%s",
                  device_id.c_str(), device_unbound ? "unbound" : "bound");
         ESP_LOGI(kTag, "2bpp raw loaded: %u bytes -> bw+red planes",
                  static_cast<unsigned>(kRaw2bppBytes));

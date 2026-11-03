@@ -351,9 +351,9 @@ void Epd73fDisplay::RefreshTask() {
             // 并把结果同步到 tx_frame_（通过其内部 packed 缓冲）。这里把
             // color_frame_/tx_frame_ 保持为白底，避免 UI 帧误判无变化。
             if (panel_.ShowPlanes(staging_bw_, yellow, red)) {
-                ESP_LOGI(kTag, "InkSight 7-color frame refreshed");
+                ESP_LOGI(kTag, "XiaowuAI 7-color frame refreshed");
             } else {
-                ESP_LOGW(kTag, "InkSight 7-color refresh failed");
+                ESP_LOGW(kTag, "XiaowuAI 7-color refresh failed");
             }
             last_ui_refresh_ms_ = esp_timer_get_time() / 1000;
             refresh_in_progress_.store(false);
@@ -374,9 +374,9 @@ void Epd73fDisplay::RefreshTask() {
             // ShowNormalizedFrame 内部把规范索引换算成面板索引 + 全刷
             // （六色约 12s，七彩约 35s，均为阻塞）。
             if (panel_.ShowNormalizedFrame(frame)) {
-                ESP_LOGI(kTag, "InkSight 6-color (4bpp) frame refreshed");
+                ESP_LOGI(kTag, "XiaowuAI 6-color (4bpp) frame refreshed");
             } else {
-                ESP_LOGW(kTag, "InkSight 6-color (4bpp) refresh failed");
+                ESP_LOGW(kTag, "XiaowuAI 6-color (4bpp) refresh failed");
             }
             last_ui_refresh_ms_ = esp_timer_get_time() / 1000;
             refresh_in_progress_.store(false);

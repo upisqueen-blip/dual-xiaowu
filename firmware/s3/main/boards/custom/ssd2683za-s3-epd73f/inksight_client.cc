@@ -4,18 +4,21 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <string>
 #include <utility>
 
 #include <esp_heap_caps.h>
 #include <esp_log.h>
+#include <esp_netif_sntp.h>
+#include <freertos/FreeRTOS.h>
 #include <http.h>
 #include <network_interface.h>
 #include <settings.h>
 #include <cJSON.h>
 
 namespace {
-constexpr char kTag[] = "InkSight";
+constexpr char kTag[] = "XiaowuAI";
 // NVS key names are limited to 15 characters (excluding the terminating NUL).
 constexpr char kDeviceTokenScopeKey[] = "token_scope";
 
@@ -270,7 +273,7 @@ bool InkSightClient::Load(NetworkInterface* network,
         return false;
     }
     if (server.empty()) {
-        error = "InkSight server URL not set";
+        error = "XiaowuAI server URL not set";
         return false;
     }
     // 没有 MAC 就别发请求：后端认不出设备，也就不会返回这台设备的配对码 /
@@ -338,7 +341,7 @@ bool InkSightClient::Load(NetworkInterface* network,
             // 250ms * 2^(attempt-1): 250,500,1000,2000 ms
             const int delay_ms = 250 * (1 << (attempt - 1));
             ESP_LOGW(kTag,
-                     "InkSight retry %d/%d after %d ms "
+                     "XiaowuAI retry %d/%d after %d ms "
                      "(tcp_err=%d http=%d stream_err=%d rows=%d/%d got=%u)",
                      attempt, kMaxAttempts - 1, delay_ms,
                      last_tcp_err, last_http_code,
@@ -828,6 +831,31 @@ void InkSightClient::SaveServerUrl(const std::string& server) {
     s.SetString("server_url", server);
 }
 
+void InkSightClient::EnsureClockForTls() {
+    static bool done = false;
+    if (done) return;
+    // 2023-11-14 之后的时间视为有效；S3 无电池 RTC，冷启动通常是 1970。
+    if (time(nullptr) > static_cast<time_t>(1700000000)) {
+        done = true;
+        return;
+    }
+    ESP_LOGI(kTag, "clock not set, syncing SNTP before HTTPS...");
+    esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG("ntp.aliyun.com");
+    if (esp_netif_sntp_init(&cfg) != ESP_OK) {
+        ESP_LOGW(kTag, "SNTP init failed, HTTPS may reject certs");
+        return;
+    }
+    // 有界等待，避免离线时把开机流程卡死。
+    const esp_err_t err = esp_netif_sntp_sync_wait(pdMS_TO_TICKS(6000));
+    esp_netif_sntp_deinit();
+    done = (err == ESP_OK);
+    if (done) {
+        ESP_LOGI(kTag, "clock synced, HTTPS ready");
+    } else {
+        ESP_LOGW(kTag, "SNTP timeout, continuing (HTTPS may fail until retry)");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 2bpp 彩色拉取（7.3 寸七彩屏）。
 // 后端 /api/render?bpp=2&colors=4 返回 application/octet-stream：
@@ -857,7 +885,7 @@ bool InkSightClient::Load2bpp(NetworkInterface* network,
         return false;
     }
     if (server.empty()) {
-        error = "InkSight server URL not set";
+        error = "XiaowuAI server URL not set";
         return false;
     }
 
@@ -882,8 +910,10 @@ bool InkSightClient::Load2bpp(NetworkInterface* network,
     url += std::to_string(kWidth);
     url += "&h=";
     url += std::to_string(kHeight);
-    // colors=4 是后端返回 raw 2bpp 的开关（render.py: params.colors >= 3）。
+    // colors=4 是后端返回 raw 2bpp 的开关（render.py: 请求带 bpp/colors 即裸帧）。
     url += "&bpp=2&colors=4";
+    // 显式声明 B 屏裸帧，避免后端按 persona 判定退回 BMP。
+    url += "&screen=B";
     if (hints.next_mode) url += "&next=1";
     if (!persona.empty()) {
         url += "&persona=";
@@ -926,7 +956,7 @@ bool InkSightClient::Load2bpp(NetworkInterface* network,
     for (int attempt = 0; attempt < kMaxAttempts && !ok; ++attempt) {
         if (attempt > 0) {
             const int delay_ms = 250 * (1 << (attempt - 1));
-            ESP_LOGW(kTag, "InkSight 2bpp retry %d/%d after %d ms",
+            ESP_LOGW(kTag, "XiaowuAI 2bpp retry %d/%d after %d ms",
                      attempt, kMaxAttempts - 1, delay_ms);
             vTaskDelay(pdMS_TO_TICKS(delay_ms));
         }
@@ -1109,7 +1139,7 @@ bool InkSightClient::Load4bpp(NetworkInterface* network,
         return false;
     }
     if (server.empty()) {
-        error = "InkSight server URL not set";
+        error = "XiaowuAI server URL not set";
         return false;
     }
     // 同 Load2bpp：没有 MAC 就不要请求，拿不到这台设备的内容。
@@ -1133,6 +1163,7 @@ bool InkSightClient::Load4bpp(NetworkInterface* network,
     }
     url += "&w=" + std::to_string(kWidth) + "&h=" + std::to_string(kHeight);
     url += "&bpp=4&colors=6";
+    url += "&screen=B";
     if (hints.next_mode) url += "&next=1";
     if (!persona.empty()) {
         url += "&persona=";

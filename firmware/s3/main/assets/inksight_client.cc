@@ -12,7 +12,7 @@
 #include <settings.h>
 
 namespace {
-constexpr char kTag[] = "InkSight";
+constexpr char kTag[] = "XiaowuAI";
 
 // BMP 文件头 + 最小 InfoHeader 合计 54 字节；InfoHeader 中关心的字段偏移。
 constexpr size_t kFileHeaderBytes = 14;
@@ -120,7 +120,7 @@ bool InkSightClient::Load(NetworkInterface* network,
         return false;
     }
     if (server.empty()) {
-        error = "InkSight server URL not set";
+        error = "XiaowuAI server URL not set";
         return false;
     }
 
@@ -178,7 +178,7 @@ bool InkSightClient::Load(NetworkInterface* network,
             // 250ms * 2^(attempt-1): 250,500,1000,2000 ms
             const int delay_ms = 250 * (1 << (attempt - 1));
             ESP_LOGW(kTag,
-                     "InkSight retry %d/%d after %d ms "
+                     "XiaowuAI retry %d/%d after %d ms "
                      "(tcp_err=%d http=%d stream_err=%d rows=%d/%d got=%u)",
                      attempt, kMaxAttempts - 1, delay_ms,
                      last_tcp_err, last_http_code,
@@ -501,7 +501,7 @@ bool InkSightClient::Load2bpp(NetworkInterface* network,
         return false;
     }
     if (server.empty()) {
-        error = "InkSight server URL not set";
+        error = "XiaowuAI server URL not set";
         return false;
     }
 
@@ -552,7 +552,7 @@ bool InkSightClient::Load2bpp(NetworkInterface* network,
     for (int attempt = 0; attempt < kMaxAttempts && !ok; ++attempt) {
         if (attempt > 0) {
             const int delay_ms = 250 * (1 << (attempt - 1));
-            ESP_LOGW(kTag, "InkSight 2bpp retry %d/%d after %d ms",
+            ESP_LOGW(kTag, "XiaowuAI 2bpp retry %d/%d after %d ms",
                      attempt, kMaxAttempts - 1, delay_ms);
             vTaskDelay(pdMS_TO_TICKS(delay_ms));
         }

@@ -147,4 +147,9 @@ public:
     // NVS 读写服务器地址（命名空间 inksight / key "server_url"）。
     static std::string LoadServerUrl();
     static void SaveServerUrl(const std::string& server);
+
+    // HTTPS 前置校时：S3 无备份 RTC，冷启动时钟停在 1970，mbedtls 会因证书
+    // Not-Before 校验失败报 -76。线上后端走 https，故首个网络请求前先调用本
+    // 函数（时钟已有效时立即返回）。最多阻塞 6 秒，超时也继续。
+    static void EnsureClockForTls();
 };

@@ -4,8 +4,12 @@
 - GET /api/preview  浏览器快照预览（返回 PNG），供内容后台「预览」按钮使用。
 
 固件契约（firmware-dual 双屏板）：
-- DUAL_A：GET /api/render?w=400&h=300&v=3.2&persona=DUAL_A  + X-Device-Token → 1-bit BMP
-- DUAL_B：GET /api/render?w=400&h=300&v=3.2&bpp=2&colors=3|4&persona=DUAL_B → raw 2bpp
+- A 屏：GET /api/render?w=400&h=300&v=3.2[&persona=…][&screen=A]  + X-Device-Token → 1-bit BMP
+- B 屏：GET /api/render?w=400&h=300&v=3.2&bpp=2&colors=3|4[&screen=B] → raw 2bpp
+  裸帧判定以「请求里显式带了 bpp / colors」或 screen=B 为准，不再依赖 persona 命名：
+  persona 只是看板模式（WEATHER / MY_ADAPTIVE …），默认空串；早先以 persona==DUAL_B
+  判断裸帧，导致空 persona 的彩色屏拿到 BMP 被当裸帧解析（表现为屏幕一片红 +
+  固件报 stream end early got=15662/30000）。
 - 未绑定：返回带配对码的引导图，并置 X-Device-Unbound: 1
 - 未注册（无 MAC）：返回重新配网引导图，并置 X-Device-Unregistered: no-mac
 """
@@ -45,15 +49,27 @@ def render(
     persona: Optional[str] = Query(default=None),
     w: int = Query(default=400, ge=100, le=1600),
     h: int = Query(default=300, ge=100, le=1200),
-    colors: int = Query(default=4, ge=2, le=6),
-    bpp: int = Query(default=2, ge=1, le=4),
+    colors: Optional[int] = Query(default=None, ge=2, le=6),
+    bpp: Optional[int] = Query(default=None, ge=1, le=4),
+    screen: Optional[str] = Query(default=None),
     v: Optional[float] = Query(default=None),
     rssi: Optional[int] = Query(default=None),
     battery: Optional[int] = Query(default=None),
     x_device_token: Optional[str] = Header(default=None),
 ):
-    screen = "B" if str(persona or "").upper() == "DUAL_B" else "A"
+    # 裸帧（raw）判定：固件走原始帧时会显式带 bpp/colors（见 Load2bpp 与 7.3 寸
+    # raw 路径），网页/单色屏预览都不带。screen 参数是显式声明，优先级最高。
+    want_raw = bpp is not None or colors is not None
+    requested_screen = str(screen or "").strip().upper()
+    if requested_screen in ("A", "B"):
+        screen = requested_screen
+    elif str(persona or "").upper() == "DUAL_B" or want_raw:
+        screen = "B"
+    else:
+        screen = "A"
     is_color = screen == "B"  # B 屏恒为彩色原始帧
+    bpp = bpp or 2
+    colors = colors or 4
     start_time = datetime.now(UTC)
 
     # 1) 无 MAC：未注册引导图

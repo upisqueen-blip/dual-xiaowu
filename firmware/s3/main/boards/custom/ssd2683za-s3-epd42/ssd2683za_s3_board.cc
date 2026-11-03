@@ -421,7 +421,7 @@ private:
         // current 为空或 "auto" 时从 WEATHER 开始
         if (current.empty() || current == "auto" || current == "AUTO") idx = 0;
         settings.SetString("persona", kPersonas[idx]);
-        ESP_LOGI(kTag, "InkSight persona cycled to %s", kPersonas[idx]);
+        ESP_LOGI(kTag, "XiaowuAI persona cycled to %s", kPersonas[idx]);
         display_->dashboard().SetInkSightFooter(
             std::string("模式: ") + kPersonas[idx] + " 正在更新…");
         Application::GetInstance().Schedule(
@@ -654,7 +654,7 @@ private:
             return;
         }
         if (inksight_busy_.exchange(true)) {
-            ESP_LOGW(kTag, "InkSight color refresh already in progress, skip");
+            ESP_LOGW(kTag, "XiaowuAI color refresh already in progress, skip");
             return;
         }
         inksight_cancel_.store(false);
@@ -671,7 +671,7 @@ private:
         bool ok = false;
         for (int attempt = 1; attempt <= 3 && !ok; ++attempt) {
             if (inksight_cancel_.load()) {
-                ESP_LOGI(kTag, "InkSight color refresh cancelled by user");
+                ESP_LOGI(kTag, "XiaowuAI color refresh cancelled by user");
                 SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
                 cleanup();
                 return;
@@ -720,7 +720,7 @@ private:
                                 " · OK刷新 · 长按返回"
                           : "彩屏刷新失败 OK再试");
         }
-        ESP_LOGI(kTag, "InkSight color screen refreshed (%s)",
+        ESP_LOGI(kTag, "XiaowuAI color screen refreshed (%s)",
                  initial_full_refresh ? "initial" : "manual");
         cleanup();
         EnterIntervalSleepIfPending();
@@ -882,7 +882,7 @@ private:
             return;
         }
         if (inksight_busy_.exchange(true)) {
-            ESP_LOGW(kTag, "InkSight refresh already in progress, skip");
+            ESP_LOGW(kTag, "XiaowuAI refresh already in progress, skip");
             return;
         }
         display_->dashboard().SetInkSightFooter("正在更新画面…");
@@ -908,7 +908,7 @@ private:
         std::string pair_code;
         for (int attempt = 1; attempt <= 3 && !ok; ++attempt) {
             if (inksight_cancel_.load()) {
-                ESP_LOGI(kTag, "InkSight refresh cancelled by user");
+                ESP_LOGI(kTag, "XiaowuAI refresh cancelled by user");
                 SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
                 cleanup();
                 return;
@@ -934,7 +934,7 @@ private:
             // 开机跳过首页菜单后，首刷若连不上服务器，回退显示一次首页菜单，
             // 避免白屏（后续失败不再重复全闪；成功上屏后由 RawFrameRefresh 覆盖）。
             if (!boot_home_fallback_done_.exchange(true)) {
-                ESP_LOGI(kTag, "InkSight 首刷失败，回退首页菜单");
+                ESP_LOGI(kTag, "XiaowuAI 首刷失败，回退首页菜单");
                 display_->ShowBootHome();
             }
             cleanup();
@@ -950,14 +950,14 @@ private:
             // FPC2 不可用时配对码只画在 FPC1，用户不翻到看板页就永远看不到，
             // 所以未绑定状态下自动切一次（was_unbound 保证只切一次，不会递归）。
             if (!was_unbound && !display_->dashboard().IsInkSight()) {
-                ESP_LOGI(kTag, "未绑定：自动切到 InkSight 页显示配对码 %s",
+                ESP_LOGI(kTag, "未绑定：自动切到 XiaowuAI 页显示配对码 %s",
                          pair_code.c_str());
                 display_->dashboard().Show(EpaperDashboard::Page::kInkSight);
             }
         } else {
             display_->dashboard().SetInkSightFooter("OK刷新 · 长按返回");
         }
-        ESP_LOGI(kTag, "InkSight refreshed (%s)",
+        ESP_LOGI(kTag, "XiaowuAI refreshed (%s)",
                  initial_full_refresh ? "full" : "partial");
         cleanup();
     }
@@ -1482,7 +1482,7 @@ private:
                     });
         mcp.AddTool("self.epaper.set_inksight_server",
                     "设置 InkSight 后端地址（今日看板画面来源）。参数 url 形如 "
-                    "http://nas.insane.vip:8090 （不要带 /api/render 后缀）。"
+                    "https://dual.xiaowuai.vip/backend （不要带 /api/render 后缀）。"
                     "设置后会立即用新地址刷新一次看板。",
                     PropertyList({Property("url", kPropertyTypeString)}),
                     [this](const PropertyList& properties) -> ReturnValue {
@@ -1490,7 +1490,7 @@ private:
                         while (!url.empty() && url.back() == '/') url.pop_back();
                         InkSightClient::SaveServerUrl(url);
                         inksight_server_ = url;
-                        ESP_LOGI(kTag, "InkSight server saved: %s", url.c_str());
+                        ESP_LOGI(kTag, "XiaowuAI server saved: %s", url.c_str());
                         display_->dashboard().Show(EpaperDashboard::Page::kInkSight);
                         return true;
                     });
@@ -1504,7 +1504,7 @@ private:
                         std::string mode = properties["mode"].value<std::string>();
                         Settings s("inksight", /*read_write=*/true);
                         s.SetString("persona", mode);
-                        ESP_LOGI(kTag, "InkSight persona saved: %s", mode.c_str());
+                        ESP_LOGI(kTag, "XiaowuAI persona saved: %s", mode.c_str());
                     display_->dashboard().Show(EpaperDashboard::Page::kInkSight);
                     return true;
                 });
@@ -1685,41 +1685,48 @@ public:
                 bytes.size() - offset);
         });
         inksight_server_ = InkSightClient::LoadServerUrl();
-        // Upgrade devices that still have the former compile-time default
+        // Upgrade devices that still have a former compile-time default
         // persisted in NVS. Explicitly configured third-party URLs remain
         // untouched.
+        // 固件默认地址已切到线上域名，下面这些历史值（旧 NAS 域名 / 办公点内网
+        // IP + 8092/8104 端口）在已出货设备里普遍存在，开机时统一迁移到
+        // INKSIGHT_DEFAULT_SERVER_URL（= https://dual.xiaowuai.vip/backend）。
         if (inksight_server_ == "http://res123.zapto.org:8090" ||
             inksight_server_ == "res123.zapto.org:8090" ||
             inksight_server_ == "http://nas.insane.vip:8080" ||
             inksight_server_ == "nas.insane.vip:8080" ||
             inksight_server_ == "http://nas.insane.vip:8090" ||
             inksight_server_ == "nas.insane.vip:8090" ||
-            // 旧编译期默认值：192.168.1.x 网段 + 8092 老端口（后端现已统一到
-            // 8104，PC 也换到 192.168.101.x 网段）。已烧录这些固件的机器开机
-            // 自动迁移到新的 INKSIGHT_DEFAULT_SERVER_URL。
+            inksight_server_ == "http://nas.insane.vip:8091" ||
+            inksight_server_ == "nas.insane.vip:8091" ||
+            inksight_server_ == "http://nas.insane.vip:8092" ||
+            inksight_server_ == "nas.insane.vip:8092" ||
+            // 旧编译期默认值：办公点内网 IP + 8080/8092/8104 历史端口。
             inksight_server_ == "http://192.168.1.4:8092" ||
             inksight_server_ == "192.168.1.4:8092" ||
-            // 上一版编译期默认 192.168.101.69:8104（办公点 B 调试值）：
-            // 跨办公点后可能不可达，迁移掉以交给自动选路逻辑。
+            inksight_server_ == "http://192.168.1.4:8104" ||
+            inksight_server_ == "192.168.1.4:8104" ||
+            inksight_server_ == "http://192.168.101.69:8092" ||
+            inksight_server_ == "192.168.101.69:8092" ||
             inksight_server_ == "http://192.168.101.69:8104" ||
             inksight_server_ == "192.168.101.69:8104") {
             inksight_server_ = INKSIGHT_DEFAULT_SERVER_URL;
             InkSightClient::SaveServerUrl(inksight_server_);
-            ESP_LOGI(kTag, "Migrated InkSight server to %s",
+            ESP_LOGI(kTag, "Migrated XiaowuAI server to %s",
                      inksight_server_.c_str());
         }
         if (inksight_server_.empty()) {
             inksight_server_ = INKSIGHT_DEFAULT_SERVER_URL;
             if (inksight_server_.empty()) {
-                ESP_LOGW(kTag, "InkSight server not set — use MCP "
+                ESP_LOGW(kTag, "XiaowuAI server not set — use MCP "
                                "self.epaper.set_inksight_server to configure, "
-                               "e.g. http://nas.insane.vip:8090");
+                               "e.g. https://dual.xiaowuai.vip/backend");
             } else {
-                ESP_LOGI(kTag, "InkSight server from compile-time default: %s",
+                ESP_LOGI(kTag, "XiaowuAI server from compile-time default: %s",
                          inksight_server_.c_str());
             }
         } else {
-            ESP_LOGI(kTag, "InkSight server (NVS): %s", inksight_server_.c_str());
+            ESP_LOGI(kTag, "XiaowuAI server (NVS): %s", inksight_server_.c_str());
         }
         // 已配置 InkSight/双屏：开机直接等网络图，跳过首页菜单（避免双闪）。
         // 首刷若拿不到图（断网），ColorRefreshTask 会兜底回退首页，避免白屏。
@@ -1727,7 +1734,7 @@ public:
         if (!boot_to_inksight) {
             display_->ShowBootHome();
         } else {
-            ESP_LOGI(kTag, "已配置 InkSight/双屏：开机跳过首页菜单，直接等网络图");
+            ESP_LOGI(kTag, "已配置 XiaowuAI/双屏：开机跳过首页菜单，直接等网络图");
         }
         display_->dashboard().SetInkSightShow(
             [this](bool initial_full) {
@@ -1776,7 +1783,7 @@ public:
                         // 不再依赖手动配置（见 InkSightClient::ResolveServerUrl）。
                         inksight_server_ =
                             InkSightClient::ResolveServerUrl(GetNetwork());
-                        ESP_LOGI(kTag, "InkSight server resolved: %s",
+                        ESP_LOGI(kTag, "XiaowuAI server resolved: %s",
                                  inksight_server_.c_str());
                         ApplyPowerMode();
                         // Overwrite any stale runtime mode left by an older

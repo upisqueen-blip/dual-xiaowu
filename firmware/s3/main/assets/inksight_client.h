@@ -20,7 +20,7 @@ public:
     static constexpr size_t kFrameBytes = kStride * kHeight; // =15000
 
     // 加载/刷新一张画面到 caller 提供的 dst[kFrameBytes] 缓冲区。
-    //   server:   如 "http://nas.insane.vip:8090" （不要尾部 /api/...）
+    //   server:   如 "https://dual.xiaowuai.vip/backend" （不要尾部 /api/...）
     //   persona:  InkSight 模式名，例如 "WEATHER"、"COUNTDOWN"、"HABIT"、
     //             "ZEN"、"STOIC"、"VOCABULARY_REVIEW" 等；空字符串时用后端
     //             默认（有 MAC 时按绑定配置）。

@@ -155,36 +155,31 @@
 #define FPC2_FRAME_BYTES   (FPC2_WIDTH * FPC2_HEIGHT / 4) // 2bpp 彩色帧
 
 // ---------------------------------------------------------------------------
-// InkSight /api/render 后端地址解析（自动选路，免手动配置）。
-// 设备联网后按以下顺序确定后端，无需在每台设备手动配网（见
-// InkSightClient::ResolveServerUrl）：
+// InkSight /api/render 后端地址（默认走线上域名，免手动配置）。
+// 设备联网后按以下顺序确定后端（见 InkSightClient::ResolveServerUrl）：
 //   1) NVS 手工覆盖（KEY- 配网 / MCP set_inksight_server 写入的 server_url）：
 //      仅当该地址当前可达时才优先使用；
-//   2) 编译期候选列表 INKSIGHT_SERVER_CANDIDATES：按各办公点内网 IP + 常用
-//      端口探测（GET /health 返回 2xx 即视为真后端），第一个可达者胜出；
-//   3) 兜底：生产环境单一域名 INKSIGHT_PRODUCTION_SERVER_URL。
-// 换办公点 / 内网 IP 漂移时，只要候选列表覆盖对应网段且设备与后端 PC 处于
-// 同一局域网，设备即自动连上，不必每次改 NVS。新增办公点只需在候选列表追加。
-// 注意：本机后端当前监听 8092（run_backend.bat 启动 xiaowu_platform.main:app）；
-// 8104 为历史端口（旧 dual 控制台），仅作兜底。候选列表把当前实际端口放前面，
-// 避免设备每次联网都先去连一个已停用的 8104 而刷一排连接失败日志。
+//   2) 编译期候选列表 INKSIGHT_SERVER_CANDIDATES：依次 GET /health 探测，
+//      第一个返回 2xx 的胜出；
+//   3) 兜底：INKSIGHT_PRODUCTION_SERVER_URL。
+// 线上后端由门户域名反代到 FastAPI：/health 与 /api/render 均已实测可用
+// （https://dual.xiaowuai.vip/backend/health → 200）。
+// 本地联调时把 http://<电脑 LAN IP>:8092 临时加到候选列表最前面即可；
+// 出厂固件不再内置任何内网地址，避免开机在离线网段白等探测超时。
 // ---------------------------------------------------------------------------
 #ifndef INKSIGHT_DEFAULT_SERVER_URL
-#  define INKSIGHT_DEFAULT_SERVER_URL  "http://192.168.1.4:8092"
+#  define INKSIGHT_DEFAULT_SERVER_URL  "https://dual.xiaowuai.vip/backend"
 #endif
 
-// 各办公点内网后端候选（IP:端口，逗号分隔）。设备联网后逐个探测 /health，
-// 首个返回 2xx 的即作为后端。当前端口 8092 前置，8104 仅作兜底以兼容旧后端。
-// 换办公点时把该办公点"电脑 LAN IP:端口"加进来即可。
+// 候选后端（逗号分隔）。出厂只保留线上域名；本地联调示例：
+//   "http://192.168.1.4:8092,https://dual.xiaowuai.vip/backend"
 #ifndef INKSIGHT_SERVER_CANDIDATES
-#  define INKSIGHT_SERVER_CANDIDATES                                       \
-    "http://192.168.1.4:8092,http://192.168.1.4:8104,"                    \
-    "http://192.168.101.69:8092,http://192.168.101.69:8104"
+#  define INKSIGHT_SERVER_CANDIDATES  "https://dual.xiaowuai.vip/backend"
 #endif
 
-// 生产环境单一域名（正式出货 / 非测试环境最终落点，单域名）。
+// 生产环境单一域名（正式出货最终落点）。
 #ifndef INKSIGHT_PRODUCTION_SERVER_URL
-#  define INKSIGHT_PRODUCTION_SERVER_URL  "http://nas.insane.vip:8090"
+#  define INKSIGHT_PRODUCTION_SERVER_URL  "https://dual.xiaowuai.vip/backend"
 #endif
 
 // Restricted credential accepted only by the product backend's LightAcade

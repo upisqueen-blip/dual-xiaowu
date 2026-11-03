@@ -30,7 +30,7 @@ public:
     static constexpr size_t kColorRaw2bppBytes = kColorWidth * kColorHeight / 4;
 
     // 加载/刷新一张画面到 caller 提供的 dst[kFrameBytes] 缓冲区。
-    //   server:   如 "http://nas.insane.vip:8090" （不要尾部 /api/...）
+    //   server:   如 "https://dual.xiaowuai.vip/backend" （不要尾部 /api/...）
     //   persona:  InkSight 模式名，例如 "WEATHER"、"COUNTDOWN"、"HABIT"、
     //             "ZEN"、"STOIC"、"VOCABULARY_REVIEW" 等；空字符串时用后端
     //             默认（有 MAC 时按绑定配置）。
@@ -107,6 +107,11 @@ public:
     // INKSIGHT_SERVER_CANDIDATES 探测首个可达后端，最后兜底生产域名。
     // network 为空时直接返回编译期默认地址。
     static std::string ResolveServerUrl(NetworkInterface* network);
+
+    // HTTPS 前置校时：S3 无备份 RTC，冷启动时钟停在 1970，mbedtls 会因证书
+    // Not-Before 校验失败报 -76。线上后端走 https，故任何 HTTPS 请求前先调用
+    // 本函数（时钟已有效时立即返回，无网络开销）。最多阻塞 6 秒，超时也继续。
+    static void EnsureClockForTls();
 
     // 探测 base_url 是否为可达的真后端（GET /health 返回 2xx）。
     static bool ProbeServerHealth(NetworkInterface* network,

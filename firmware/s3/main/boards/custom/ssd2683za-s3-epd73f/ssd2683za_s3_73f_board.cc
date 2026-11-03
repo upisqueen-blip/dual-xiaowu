@@ -45,7 +45,7 @@
 
 namespace {
 constexpr const char* kTag = "Ssd2683zaS373fBoard";
-constexpr const char* kInkSightFixBuildId = "2026-10-14-8091-token-scope";
+constexpr const char* kInkSightFixBuildId = "2026-11-03-online-domain";
 }
 
 // 7.3 寸七彩屏板型（ssd2683za-s3-epd73f，main_2 三屏幕板 + 8P->50P 转接）。
@@ -396,7 +396,7 @@ private:
                 // If the URL/config changed during an in-flight request, don't drop
                 // the refresh: run once more afterward with the latest settings.
                 inksight_refresh_task_rerun_ = true;
-                ESP_LOGI(kTag, "InkSight refresh already running; queue one refresh with latest settings");
+                ESP_LOGI(kTag, "XiaowuAI refresh already running; queue one refresh with latest settings");
                 return;
             }
             inksight_refresh_task_pending_ = true;
@@ -405,7 +405,7 @@ private:
         if (!task_args) {
             std::lock_guard<std::mutex> lock(inksight_refresh_task_mutex_);
             inksight_refresh_task_pending_ = false;
-            ESP_LOGE(kTag, "Cannot allocate InkSight refresh task argument");
+            ESP_LOGE(kTag, "Cannot allocate XiaowuAI refresh task argument");
             return;
         }
         const BaseType_t created = xTaskCreate(
@@ -434,7 +434,7 @@ private:
             std::lock_guard<std::mutex> lock(inksight_refresh_task_mutex_);
             inksight_refresh_task_pending_ = false;
             inksight_refresh_task_rerun_ = false;
-            ESP_LOGE(kTag, "Cannot create InkSight refresh task");
+            ESP_LOGE(kTag, "Cannot create XiaowuAI refresh task");
         }
     }
 
@@ -445,7 +445,7 @@ private:
         // 先抢占刷新锁，再分配大缓冲区；否则并发排队的刷新会重复覆盖
         // 裸指针并造成 PSRAM 泄漏，最终可能触发重启。
         if (inksight_busy_.exchange(true)) {
-            ESP_LOGW(kTag, "InkSight refresh already in progress, skip");
+            ESP_LOGW(kTag, "XiaowuAI refresh already in progress, skip");
             return;
         }
         auto cleanup = [this]() { inksight_busy_.store(false); };
@@ -460,9 +460,9 @@ private:
                                                SystemInfo::GetMacAddress(),
                                                &unbind_error)) {
                     s.SetInt("rebind_pending", 0);
-                    ESP_LOGI(kTag, "InkSight: 已解绑，本次刷新会显示配对码");
+                    ESP_LOGI(kTag, "XiaowuAI: 已解绑，本次刷新会显示配对码");
                 } else {
-                    ESP_LOGW(kTag, "InkSight: 解绑仍未成功(%s)",
+                    ESP_LOGW(kTag, "XiaowuAI: 解绑仍未成功(%s)",
                              unbind_error.c_str());
                 }
             }
@@ -480,7 +480,7 @@ private:
         }
         if (ink_bw_ == nullptr || ink_yellow_ == nullptr || ink_red_ == nullptr ||
             ink_frame4_ == nullptr) {
-            ESP_LOGE(kTag, "InkSight: PSRAM OOM for frame buffers");
+            ESP_LOGE(kTag, "XiaowuAI: PSRAM OOM for frame buffers");
             if (ink_bw_) heap_caps_free(ink_bw_);
             if (ink_yellow_) heap_caps_free(ink_yellow_);
             if (ink_red_) heap_caps_free(ink_red_);
@@ -491,7 +491,7 @@ private:
         }
         inksight_cancel_.store(false);
 
-        ESP_LOGI(kTag, "InkSight: updating 7-color screen...");
+        ESP_LOGI(kTag, "XiaowuAI: updating 7-color screen...");
         Settings inksight_settings("inksight", /*read_write=*/false);
         std::string persona = inksight_settings.GetString("persona", "");
         if (persona == "auto" || persona == "AUTO") {
@@ -510,7 +510,7 @@ private:
         hints.refresh_minutes = inksight_settings.GetInt("color_refresh", 0);
         for (int attempt = 1; attempt <= 3 && !ok; ++attempt) {
             if (inksight_cancel_.load()) {
-                ESP_LOGI(kTag, "InkSight refresh cancelled by user");
+                ESP_LOGI(kTag, "XiaowuAI refresh cancelled by user");
                 SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
                 cleanup();
                 return;
@@ -549,7 +549,7 @@ private:
             !std::string(INKSIGHT_FALLBACK_SERVER_URL).empty()) {
             const std::string fallback = INKSIGHT_FALLBACK_SERVER_URL;
             ESP_LOGW(kTag,
-                     "InkSight %s 失败(%s)，回退到备用地址 %s 重试一次",
+                     "XiaowuAI %s 失败(%s)，回退到备用地址 %s 重试一次",
                      inksight_server_.c_str(),
                      FriendlyInkSightError(error).c_str(), fallback.c_str());
             error.clear();
@@ -574,7 +574,7 @@ private:
         SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
         inksight_last_failed_.store(!ok);
         if (!ok) {
-            ESP_LOGE(kTag, "InkSight download failed: %s",
+            ESP_LOGE(kTag, "XiaowuAI download failed: %s",
                      FriendlyInkSightError(error).c_str());
             cleanup();
             return;
@@ -587,14 +587,14 @@ private:
                 cleanup();
                 return;
             }
-            ESP_LOGI(kTag, "InkSight frame queued for 6-color (4bpp) refresh");
+            ESP_LOGI(kTag, "XiaowuAI frame queued for 6-color (4bpp) refresh");
         } else {
             if (!display_->ShowInkSightPlanes(ink_bw_, ink_yellow_, ink_red_)) {
                 inksight_last_failed_.store(true);
                 cleanup();
                 return;
             }
-            ESP_LOGI(kTag, "InkSight frame queued for 4-color (2bpp) refresh");
+            ESP_LOGI(kTag, "XiaowuAI frame queued for 4-color (2bpp) refresh");
         }
         cleanup();
         if (power_mode_ == PowerMode::kIntermittent &&
@@ -948,7 +948,7 @@ private:
                             self->EnterWifiConfigMode();
                         });
                     } else if (i == 1) {
-                        ESP_LOGI(kTag, "KEY_OK long press: cancel InkSight");
+                        ESP_LOGI(kTag, "KEY_OK long press: cancel XiaowuAI");
                         self->inksight_cancel_.store(true);
                     } else {
                         // KEY+（GPIO0，兼 BOOT）长按 3 秒：切换 活跃 / 间歇。
@@ -1012,7 +1012,7 @@ private:
             });
         mcp.AddTool("self.epaper.set_inksight_server",
                     "设置 InkSight 后端地址（七彩屏看板画面来源）。参数 url 形如 "
-                    "http://nas.insane.vip:8091 （不要带 /api/render 后缀）。"
+                    "https://dual.xiaowuai.vip/backend （不要带 /api/render 后缀）。"
                     "设置后会立即用新地址刷新一次看板。",
                     PropertyList({Property("url", kPropertyTypeString)}),
                     [this](const PropertyList& properties) -> ReturnValue {
@@ -1020,7 +1020,7 @@ private:
                         while (!url.empty() && url.back() == '/') url.pop_back();
                         InkSightClient::SaveServerUrl(url);
                         inksight_server_ = url;
-                        ESP_LOGI(kTag, "InkSight server saved: %s", url.c_str());
+                        ESP_LOGI(kTag, "XiaowuAI server saved: %s", url.c_str());
                         Application::GetInstance().Schedule(
                             [this]() { StartInkSightRefresh(); });
                         return true;
@@ -1069,7 +1069,7 @@ private:
                         std::string mode = properties["mode"].value<std::string>();
                         Settings s("inksight", /*read_write=*/true);
                         s.SetString("persona", mode);
-                        ESP_LOGI(kTag, "InkSight persona saved: %s", mode.c_str());
+                        ESP_LOGI(kTag, "XiaowuAI persona saved: %s", mode.c_str());
                         Application::GetInstance().Schedule(
                             [this]() { StartInkSightRefresh(); });
                         return true;
@@ -1333,7 +1333,7 @@ private:
 
 public:
     Ssd2683zaS373fBoard() {
-        ESP_LOGI(kTag, "InkSight fix build: %s", kInkSightFixBuildId);
+        ESP_LOGI(kTag, "XiaowuAI fix build: %s", kInkSightFixBuildId);
         InitializePowerAmplifier();
         InitializeI2c();  // 仅 ES8311 方案真正建总线；MAX98357 方案只打日志
         // 开机默认 SPI 方式（NVS "epd73f"/"spi" = bitbang|hw）。必须在
@@ -1346,41 +1346,53 @@ public:
         }
         display_ = new Epd73fDisplay();
         inksight_server_ = InkSightClient::LoadServerUrl();
-        // NVS 地址曾被不同版本写成带斜杠/路径的形式。仅解析主机端口后，
-        // 对本设备固定服务器的 8090 强制迁移到公开 API 入口 8091。
-        if (inksight_server_.rfind("http://nas.insane.vip:8090", 0) == 0 ||
-            inksight_server_.rfind("https://nas.insane.vip:8090", 0) == 0 ||
-            inksight_server_.rfind("nas.insane.vip:8090", 0) == 0) {
-            inksight_server_ = INKSIGHT_DEFAULT_SERVER_URL;
-            InkSightClient::SaveServerUrl(inksight_server_);
-            ESP_LOGI(kTag, "迁移 NVS InkSight 地址至 %s", inksight_server_.c_str());
-        }
-        // 升级迁移：旧编译期默认值持久化在 NVS 的设备迁移到当前默认。
-        // 8090 只监听服务端本机回环地址，实体设备无法直连；统一迁移到
-        // 已通过完整链路验证的 Web/API 入口 8091。
-        if (inksight_server_ == "http://nas.insane.vip:8090" ||
-            inksight_server_ == "nas.insane.vip:8090" ||
-            inksight_server_ == "http://nas.insane.vip:8080" ||
-            inksight_server_ == "nas.insane.vip:8080" ||
-            inksight_server_ == "http://nas.insane.vip:8090" ||
-            inksight_server_ == "nas.insane.vip:8090") {
-            inksight_server_ = INKSIGHT_DEFAULT_SERVER_URL;
-            InkSightClient::SaveServerUrl(inksight_server_);
-            ESP_LOGI(kTag, "Migrated InkSight server to %s",
-                     inksight_server_.c_str());
+        // 历史版本的编译期默认地址（旧 NAS 域名 nas.insane.vip 的 8090/8091
+        // 端口、办公点内网 IP）已全部下线，固件默认改为线上域名。下面按前缀
+        // 匹配兼容 NVS 里可能带斜杠/路径的旧值，统一迁移到当前默认地址；
+        // 用户显式配置的第三方地址不受影响。
+        {
+            static const char* kLegacyPrefixes[] = {
+                "http://nas.insane.vip:8080",
+                "nas.insane.vip:8080",
+                "http://nas.insane.vip:8090",
+                "https://nas.insane.vip:8090",
+                "nas.insane.vip:8090",
+                "http://nas.insane.vip:8091",
+                "https://nas.insane.vip:8091",
+                "nas.insane.vip:8091",
+                "http://192.168.1.4:8092",
+                "192.168.1.4:8092",
+                "http://192.168.101.69:8092",
+                "192.168.101.69:8092",
+                "http://192.168.101.69:8104",
+                "192.168.101.69:8104",
+            };
+            bool legacy = false;
+            for (const char* prefix : kLegacyPrefixes) {
+                if (inksight_server_.rfind(prefix, 0) == 0) {
+                    legacy = true;
+                    break;
+                }
+            }
+            if (legacy) {
+                inksight_server_ = INKSIGHT_DEFAULT_SERVER_URL;
+                InkSightClient::SaveServerUrl(inksight_server_);
+                ESP_LOGI(kTag, "迁移 NVS XiaowuAI 地址至 %s",
+                         inksight_server_.c_str());
+            }
         }
         if (inksight_server_.empty()) {
             inksight_server_ = INKSIGHT_DEFAULT_SERVER_URL;
             if (inksight_server_.empty()) {
-                ESP_LOGW(kTag, "InkSight server not set — use MCP "
+                ESP_LOGW(kTag, "XiaowuAI server not set — use MCP "
                                "self.epaper.set_inksight_server to configure, "
-                               "e.g. http://nas.insane.vip:8091");
+                               "e.g. https://dual.xiaowuai.vip/backend");
             } else {
-                ESP_LOGI(kTag, "InkSight server from compile-time default: %s",
+                ESP_LOGI(kTag, "XiaowuAI server from compile-time default: %s",
                          inksight_server_.c_str());
             }
         } else {
-            ESP_LOGI(kTag, "InkSight server (NVS): %s", inksight_server_.c_str());
+            ESP_LOGI(kTag, "XiaowuAI server (NVS): %s", inksight_server_.c_str());
         }
         // 面板型号（7.3" (E) 六色 / (F) 七彩）：分辨率帧格式一致，但初始化
         // 序列与色索引不同，用错型号屏幕完全点不亮。NVS 键 "variant"。
@@ -1414,6 +1426,9 @@ public:
         // 等联网成功的这一刻再补一次解绑，并立刻刷一屏把配对码显示出来。
         SetNetworkEventCallback([this](NetworkEvent event, const std::string&) {
             if (event != NetworkEvent::Connected) return;
+            // 线上后端走 HTTPS：先确保系统时间有效，否则首个 TLS 握手会因证书
+            // Not-Before 校验失败（冷启动时钟停在 1970）。必须早于下面的心跳。
+            InkSightClient::EnsureClockForTls();
             // Wi-Fi 起来了才轮得到省电策略与模式上报（构造期 esp_wifi 还没初始化）。
             ApplyPowerMode();
             ReportRuntimeMode(power_mode_);
@@ -1438,7 +1453,7 @@ public:
         });
         if (xTaskCreate(InkSightRefreshTask, "epd73f_inksight", 4096, this, 3,
                         nullptr) != pdPASS) {
-            ESP_LOGW(kTag, "Cannot create InkSight refresh task");
+            ESP_LOGW(kTag, "Cannot create XiaowuAI refresh task");
         }
         // 活跃模式每 5 分钟心跳；间歇模式在每次唤醒时单独上报后即睡眠。
         if (xTaskCreate(HeartbeatTask, "epd73f_hb", 4096, this, 3, nullptr) !=
