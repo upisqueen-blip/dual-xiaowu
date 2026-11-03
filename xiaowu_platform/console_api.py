@@ -1,6 +1,6 @@
 """用户内容后台（dual 控制台）全部接口。
 
-前端（apps/content-console 即原 dual 后台）通过 /backend 反代调用这里的 /api/* 端点，
+前端（apps/content-console-cn，经 next.config 的 /api 反代）调用这里的 /api/* 端点，
 复用既有 users / device_bindings / content_configs 体系，新增少量表支撑共享成员、
 老师授权、个人大模型配置、孩子信息、服务设置与图片上传。
 """

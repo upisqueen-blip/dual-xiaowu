@@ -706,6 +706,90 @@ def render_scene_modules(title: str, modules: list, w: int, h: int, colors: int,
     return img
 
 
+def render_weather(weather: dict, w: int, h: int, colors: int) -> Image.Image:
+    """渲染天气卡片（B 屏默认展示成都天气，也可由后台「天气」模式显式选择）。
+
+    数据来自 console_api._weather_payload（当前为演示数据，接入真实天气源时
+    只需替换该函数，本渲染器无需改动）。
+    """
+    scale = w / 400.0
+    img = _palette_p_image(w, h, colors) if colors >= 3 else Image.new("1", (w, h), 1)
+    draw = ImageDraw.Draw(img)
+    fg = 0
+    pad = int(14 * scale)
+    font_city = _load_cjk(max(18, int(24 * scale)))
+    font_temp = _load_cjk(max(30, int(46 * scale)))
+    font_desc = _load_cjk(max(14, int(18 * scale)))
+    font_meta = _load_cjk(max(11, int(14 * scale)))
+    font_fc = _load_cjk(max(10, int(13 * scale)))
+
+    city = str(weather.get("city") or "成都")
+    now = datetime.now()
+    date_str = now.strftime("%m月%d日")
+    weekday = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][now.weekday()]
+    cur = str(weather.get("current_temp") or "--")
+    desc = str(weather.get("today_desc") or weather.get("description") or "晴")
+    low = str(weather.get("today_low") or "--")
+    high = str(weather.get("today_high") or "--")
+    wind = f"{weather.get('today_wind_dir') or ''} {weather.get('today_wind_level') or ''}".strip()
+    humidity = str(weather.get("today_humidity") or "")
+    advice = str(weather.get("advice") or "")
+    plate = str(weather.get("plate_limit") or "")
+
+    # 顶部：城市 + 日期/星期
+    draw.text((pad, int(10 * scale)), city, fill=fg, font=font_city)
+    date_w = _text_w(draw, f"{date_str} {weekday}", font_meta)
+    draw.text((w - pad - date_w, int(18 * scale)), f"{date_str} {weekday}", fill=fg, font=font_meta)
+
+    # 主温区：大号当前温度 + 右侧天气描述/高低温
+    top = int(50 * scale)
+    draw.text((pad, top), cur, fill=fg, font=font_temp)
+    temp_w = _text_w(draw, cur, font_temp)
+    rx = pad + temp_w + int(16 * scale)
+    draw.text((rx, top + int(10 * scale)), desc, fill=fg, font=font_desc)
+    draw.text((rx, top + int(36 * scale)), f"{low} ~ {high}", fill=fg, font=font_meta)
+
+    # 分隔线
+    y_line = top + int(58 * scale)
+    draw.line([(pad, y_line), (w - pad, y_line)], fill=fg, width=max(1, int(2 * scale)))
+
+    # 中间信息行：风 / 湿度 / 限行
+    y_meta = y_line + int(10 * scale)
+    meta_bits = []
+    if wind:
+        meta_bits.append(f"风 {wind}")
+    if humidity:
+        meta_bits.append(f"湿度 {humidity}")
+    if plate:
+        meta_bits.append(f"限行 {plate}")
+    draw.text((pad, y_meta), "  ·  ".join(meta_bits)[:30], fill=fg, font=font_meta)
+
+    # 温馨提示
+    y_advice = y_meta + int(28 * scale)
+    advice_text = ("温馨提示：" + advice) if advice else ""
+    if advice_text:
+        draw.text((pad, y_advice), advice_text[:40], fill=fg, font=font_meta)
+
+    # 底部三日预报
+    y_fc = y_advice + int(30 * scale)
+    fc = weather.get("forecast") or []
+    if fc:
+        draw.line([(pad, y_fc - int(6 * scale)), (w - pad, y_fc - int(6 * scale))], fill=fg, width=1)
+        n = min(len(fc), 3)
+        col_w = (w - 2 * pad) // max(1, n)
+        for i, item in enumerate(fc[:n]):
+            cx = pad + col_w * i
+            day = str(item.get("day") or "")
+            rng = str(item.get("temp_range") or "")
+            d = str(item.get("desc") or "")
+            draw.text((cx, y_fc), day, fill=fg, font=font_fc)
+            draw.text((cx, y_fc + int(16 * scale)), rng, fill=fg, font=font_fc)
+            draw.text((cx, y_fc + int(32 * scale)), d, fill=fg, font=font_fc)
+    else:
+        draw.text((pad, y_fc), "暂无预报数据", fill=fg, font=font_meta)
+    return img
+
+
 def render_family_express_bills(express: list[dict], bills: list[dict], w: int, h: int,
                                 colors: int) -> Image.Image:
     scale = w / 400.0
@@ -878,7 +962,8 @@ def _render_dual_screen_inner(mac: str, screen: str, w: int, h: int, colors: int
         scene_key = str(cfg_root.get("sceneKey") or "study")
         scene_cfg = (cfg_root.get("config") or {}).get(scene_key) or {}
         b_cfg = scene_cfg.get("b") or {}
-        b_mode = str(b_cfg.get("mode") or ("course" if scene_key == "study" else "family" if scene_key == "family" else "health-plan" if scene_key == "health" else "finance-trend" if scene_key == "finance" else "office"))
+        # 未配置设备的出厂默认：B 屏展示成都天气（A 屏由固件欢迎页引导去后台配置）。
+        b_mode = str(b_cfg.get("mode") or ("weather" if scene_key == "study" else "family" if scene_key == "family" else "health-plan" if scene_key == "health" else "finance-trend" if scene_key == "finance" else "office"))
         if b_mode == "published-app":
             return _render_published_app(b_cfg, w, h, colors, screen="B")
         if b_mode == "album":
@@ -898,6 +983,15 @@ def _render_dual_screen_inner(mac: str, screen: str, w: int, h: int, colors: int
                 return _finance.render_b_screen(b_cfg, cfg_root, w, h, colors, mac=mac)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[FINANCE] B screen fallback: %s", exc)
+        # 天气场景：B 屏默认（未配置设备）展示天气，城市默认成都，可在 b_cfg.city 覆盖
+        if b_mode == "weather":
+            try:
+                from . import console_api as _console
+                city = str(b_cfg.get("city") or "成都")
+                weather = _console._weather_payload(city)
+                return render_weather(weather, w, h, colors)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[WEATHER] B screen fallback: %s", exc)
         if scene_key != "study" or b_mode != "course":
             footer = ""
             if scene_key == "finance":

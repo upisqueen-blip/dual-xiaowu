@@ -1257,6 +1257,11 @@ private:
 
     void HandleKeyOk() {
         ESP_LOGI(kTag, "KEY_OK click: GPIO%d", KEY_OK_GPIO);
+        // 欢迎页（出厂/未配置默认页）按 OK 进入功能菜单，而不是唤醒对话。
+        if (display_->dashboard().IsWelcome()) {
+            display_->dashboard().Enter();
+            return;
+        }
         if (display_->dashboard().IsHome()) {
             const int selected = display_->dashboard().SelectedItem();
             ESP_LOGI(kTag, "KEY_OK enter home menu item %d/7", selected + 1);

@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>小悟 AI 墨水屏 · A 屏欢迎页（黑白快刷）</title>
+<style>
+  :root{
+    --ink:#111111;
+    --paper:#f7f6f2;     /* 墨水屏底色（微暖白） */
+    --bezel:#2a2a2a;
+    --line:#cfcdc6;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    font-family:"PingFang SC","Microsoft YaHei","Noto Sans SC",-apple-system,system-ui,sans-serif;
+    background:#e7e6e1;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    padding:24px 16px;gap:14px;-webkit-font-smoothing:antialiased;
+  }
+
+  /* 设备外壳 + 4:3 墨水屏 */
+  .device{
+    background:linear-gradient(160deg,#333,#1c1c1c);
+    padding:14px;border-radius:18px;box-shadow:0 18px 44px rgba(0,0,0,.28);
+  }
+  .epd{
+    width:min(440px,92vw);aspect-ratio:4/3;
+    background:var(--paper);
+    border-radius:6px;
+    padding:22px 22px 16px;
+    position:relative;overflow:hidden;
+    /* 轻微墨水屏纸纹 */
+    background-image:radial-gradient(rgba(0,0,0,.025) 1px, transparent 1.3px);
+    background-size:4px 4px;
+    color:var(--ink);
+    display:flex;flex-direction:column;
+  }
+  .logo{width:118px;margin:2px auto 10px;filter:grayscale(1) brightness(.92) contrast(1.05)}
+  .logo svg{width:100%;height:auto;display:block}
+  .greet{text-align:center;font-size:21px;font-weight:800;letter-spacing:.5px;line-height:1.3}
+  .rule{height:2px;background:var(--ink);width:54px;margin:9px auto 12px}
+  .body{font-size:13.5px;line-height:1.78;white-space:pre-line;text-align:center;flex:1}
+  /* 黑白屏上用反白块强调群号，醒目且不依赖灰度 */
+  .group{
+    display:inline-block;background:var(--ink);color:#fff;
+    font-size:17px;font-weight:800;letter-spacing:2px;
+    padding:5px 14px;border-radius:5px;margin:4px 0 2px;
+  }
+  .footer{
+    text-align:center;font-size:11.5px;color:#6b6b6b;
+    border-top:1px solid var(--line);padding-top:8px;margin-top:8px;letter-spacing:.5px;
+  }
+
+  .caption{font-size:12px;color:#7a7872;text-align:center;max-width:440px;line-height:1.7}
+  .caption b{color:var(--ink)}
+</style>
+</head>
+<body>
+
+  <div class="device">
+    <div class="epd">
+      <!-- 矢量标志，灰度化以贴近黑白墨水屏观感 -->
+      <div class="logo" aria-label="小悟 AI 标志">
+        <svg viewBox="0 0 1600 600" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="小悟AI">
+          <g transform="translate(48 22)">
+            <path fill="#08090A" d="M262 8C218 112 109 209 83 328 53 465 144 558 262 558s209-93 179-230C415 209 306 112 262 8Z"/>
+            <path fill="#E8C85C" d="M113 317c22-80 77-122 149-122s127 42 149 122c-31-61-82-87-149-87s-118 26-149 87Z"/>
+            <path fill="#F8F8F4" d="M263 222c-32-43-112-39-132 17-19 53 14 100 63 110-39 21-31 104 69 105 101-1 109-84 70-105 49-10 82-57 63-110-20-56-100-60-133-17Z"/>
+            <path fill="#F8F8F4" d="M116 286c-49-7-61 54-21 80 13 8 27 11 43 8-19-17-28-42-22-88Zm292 0c49-7 61 54 21 80-13 8-27 11-43 8 19-17 28-42 22-88Z"/>
+            <ellipse cx="199" cy="298" rx="25" ry="34" fill="#08090A"/>
+            <ellipse cx="327" cy="298" rx="25" ry="34" fill="#08090A"/>
+            <circle cx="190" cy="286" r="6" fill="#fff"/>
+            <circle cx="318" cy="286" r="6" fill="#fff"/>
+            <ellipse cx="263" cy="347" rx="12" ry="8" fill="#08090A"/>
+            <path d="M239 376c15 16 34 16 49 0" fill="none" stroke="#08090A" stroke-width="8" stroke-linecap="round"/>
+            <path d="M110 438c20 34 46 58 78 72" fill="none" stroke="#F8F8F4" stroke-width="12" stroke-linecap="round"/>
+            <g stroke="#F8F8F4" stroke-width="7" fill="none" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="219" y="117" width="88" height="82" rx="7"/>
+              <path d="M219 140h-42l-21-19m151 19h42l21-19M219 174h-58l-32 24m178-24h58l32 24"/>
+              <circle cx="151" cy="116" r="7"/><circle cx="375" cy="116" r="7"/>
+              <path d="M231 103V88m21 15V88m22 15V88m21 15V88M231 214v-13m21 13v-13m22 13v-13m21 13v-13"/>
+            </g>
+            <text x="263" y="177" text-anchor="middle" fill="#E8C85C" font-family="Arial, sans-serif" font-size="54" font-weight="800">AI</text>
+          </g>
+          <g transform="translate(570 138)">
+            <g fill="#08090A">
+              <path d="M130 10h62v285c0 47-25 72-74 72H74l21-51h19c11 0 16-6 16-18Z"/>
+              <path d="M24 101h57L38 291H-18Z"/>
+              <path d="M240 101h57l42 190h-56Z"/>
+            </g>
+            <path d="M130 10h62l-22 27h-40Z" fill="#E8C85C"/>
+            <g transform="translate(350)" fill="#08090A">
+              <path d="M0 110h45L30 287H-15Zm67-45h51v296H67Zm74 54h38v192h-38Z"/>
+              <path d="M202 18h292l-10 50H202Zm20 83h241v48H222Zm-19 82h282v48H203Z"/>
+              <path fill-rule="evenodd" d="M214 251h259v111H214Zm57 43v27h144v-27Z"/>
+            </g>
+            <path d="M725 205h60l28 23h72v13h-87l-28-23h-45Z" fill="#E8C85C"/>
+            <circle cx="735" cy="211" r="13" fill="none" stroke="#E8C85C" stroke-width="8"/>
+            <g transform="translate(920 5)" fill="#E8C85C">
+              <path fill-rule="evenodd" d="M0 356 118 0h76l118 356h-69l-24-78H91l-23 78Zm108-134h94l-47-154Z"/>
+              <path d="M347 0h66v356h-66Z"/>
+            </g>
+          </g>
+        </svg>
+      </div>
+
+      <div class="greet">你好大佬，<br/>欢迎来到小悟众创！</div>
+      <div class="rule"></div>
+
+      <div class="body">这是你的小悟AI墨水屏——
+一块会思考的电子纸。
+
+售后群  <span class="group">1056214329</span>
+有问题，随时戳我们
+
+一起进小悟众创
+把脑洞变成屏幕上的现实</div>
+
+      <div class="footer">按 OK 进入功能菜单</div>
+    </div>
+  </div>
+
+  <p class="caption">
+    <b>A 屏 · 黑白快刷欢迎页（实际渲染示意）</b><br/>
+    配网成功后默认进入此页；OK 进入功能菜单。正文为纯文本（不含 emoji，适配墨水屏字库）。
+    固件文件：<b>firmware/s3/.../epaper_dashboard.cc :: RenderWelcome()</b>。
+  </p>
+
+</body>
+</html>

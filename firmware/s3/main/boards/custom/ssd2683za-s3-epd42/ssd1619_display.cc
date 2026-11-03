@@ -114,7 +114,9 @@ Ssd1619Display::Ssd1619Display()
 }
 
 void Ssd1619Display::ShowBootHome() {
-    dashboard_.Show(EpaperDashboard::Page::kHome);
+    // 配网成功后默认进入欢迎页（引导用户去后台配置屏幕内容），
+    // 按 OK 再进入功能菜单。
+    dashboard_.Show(EpaperDashboard::Page::kWelcome);
 }
 
 Ssd1619Display::~Ssd1619Display() {

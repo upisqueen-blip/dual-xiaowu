@@ -17,7 +17,7 @@
 - `apps/miniapp-cn/`：原 `miniprogram-xiaowu/` 完整微信小程序
 - `firmware/s3/`：原 `firmware-dual/` 完整 S3 双屏固件业务源码
 - `services/legacy-api/`：原后台兼容 API，保证上述界面功能可继续联调
-- `apps/content-console/`：面向海外用户的新 PC 内容端
+- `apps/content-console-cn/`：唯一在用的 PC 双屏内容后台（旧 fork 已删除，需要时从 git 历史 `7f7d386` 取回）
 - `apps/pc-console/`：仅运营人员使用的 PC 运营后台
 
 迁移详情与端口规划见 [docs/full-migration.md](docs/full-migration.md)。

@@ -263,6 +263,7 @@ const char* EpaperDashboard::PageName(Page page) {
         case Page::kAnalysis: return "学情分析";
         case Page::kProfile: return "用户中心";
         case Page::kActivation: return "设备配网与激活";
+        case Page::kWelcome: return "欢迎";
         default: return "首页";
     }
 }
@@ -394,6 +395,7 @@ void EpaperDashboard::Show(Page page) {
             page == Page::kHome || page == Page::kBookReader ||
             page == Page::kConversation || page == Page::kInkSight ||
             page == Page::kSpeaking || page == Page::kActivation ||
+            page == Page::kWelcome ||
             transitions_since_full_ >= kTransitionsPerFull;
         if (always_full) transitions_since_full_ = 0;
         else ++transitions_since_full_;
@@ -468,6 +470,7 @@ void EpaperDashboard::Show(const std::string& name) {
              name == "个人中心" || name == "口语设置") Show(Page::kProfile);
     else if (name == "inksight" || name == "ink" || name == "看板" ||
              name == "今日看板") Show(Page::kInkSight);
+    else if (name == "welcome" || name == "欢迎") Show(Page::kWelcome);
     else Show(Page::kHome);
 }
 
@@ -482,6 +485,8 @@ void EpaperDashboard::HideActivation() {
 }
 
 void EpaperDashboard::Next() {
+    // 欢迎页是根页面，没有可选项，方向键不跳转。
+    if (page_ == Page::kWelcome) return;
     selected_item_ = (selected_item_ + 1) % kMenuItemCount;
     ESP_LOGI(kDashboardTag, "Menu selection: %d/%d", selected_item_ + 1,
              kMenuItemCount);
@@ -489,6 +494,8 @@ void EpaperDashboard::Next() {
 }
 
 void EpaperDashboard::Previous() {
+    // 欢迎页是根页面，没有可选项，方向键不跳转。
+    if (page_ == Page::kWelcome) return;
     selected_item_ = (selected_item_ + kMenuItemCount - 1) % kMenuItemCount;
     ESP_LOGI(kDashboardTag, "Menu selection: %d/%d", selected_item_ + 1,
              kMenuItemCount);
@@ -499,6 +506,11 @@ void EpaperDashboard::Enter() {
     static constexpr Page pages[] = {Page::kSpeaking, Page::kReading, Page::kWords,
                                      Page::kSchedule, Page::kAnalysis,
                                      Page::kProfile};
+    // 欢迎页按下 OK 进入功能菜单（口语陪练/阅读/…）。
+    if (page_ == Page::kWelcome) {
+        Show(Page::kHome);
+        return;
+    }
     if (page_ == Page::kHome) Show(pages[selected_item_]);
 }
 
@@ -509,6 +521,13 @@ void EpaperDashboard::Back() {
         Show(Page::kProfile);
         return;
     }
+    // 功能菜单返回欢迎页（根页面）。
+    if (page_ == Page::kHome) {
+        Show(Page::kWelcome);
+        return;
+    }
+    // 欢迎页是根页面，返回键无操作。
+    if (page_ == Page::kWelcome) return;
     Show(Page::kHome);
 }
 
@@ -1100,6 +1119,21 @@ std::string EpaperDashboard::RenderProfile() const {
     return body;
 }
 
+std::string EpaperDashboard::RenderWelcome() const {
+    // 配网成功后默认进入的欢迎页（A 屏黑白快刷）。
+    // 风格：亲切、有社区感；同时给出售后群号，方便用户第一时间加群。
+    // 注意：A 屏为黑白墨水屏，正文不含 emoji（字库无彩色表情），
+    // 行数控制在 4.2" 屏可完整显示的范围内。
+    // footer 另有"按 OK 进入功能菜单"提示，此处正文只放引导文案。
+    return "你好大佬，欢迎来到小悟众创！\n\n"
+           "这是你的小悟AI墨水屏——\n"
+           "一块会思考的电子纸。\n\n"
+           "售后群  1056214329\n"
+           "有问题，随时戳我们\n\n"
+           "一起进小悟众创\n"
+           "把脑洞变成屏幕上的现实";
+}
+
 void EpaperDashboard::ProfilePrev() {
     if (page_ != Page::kProfile) return;
     if (profile_popup_) {
@@ -1301,6 +1335,7 @@ void EpaperDashboard::Render() {
         case Page::kAnalysis: body = RenderAnalysis(); break;
         case Page::kProfile: body = RenderProfile(); break;
         case Page::kActivation: body = activation_message_; break;
+        case Page::kWelcome: body = RenderWelcome(); break;
         case Page::kInkSight:
             // InkSight 画面直接通过 HTTP 解码后刷显存，LVGL title/body
             // 均隐藏。body 留空占位。
@@ -1357,6 +1392,12 @@ void EpaperDashboard::Render() {
         std::snprintf(footer, sizeof(footer), "当前：%s  ·  +/-选择  ·  OK唤醒",
                       menu_names[selected_item_]);
         lv_label_set_text(footer_, footer);
+    } else if (page_ == Page::kWelcome) {
+        // 欢迎页：显示引导文案，隐藏功能菜单，footer 提示如何进入菜单。
+        lv_obj_add_flag(menu_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(body_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(footer_, LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(footer_, "按 OK 进入功能菜单");
     } else {
         lv_obj_add_flag(menu_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(body_, LV_OBJ_FLAG_HIDDEN);

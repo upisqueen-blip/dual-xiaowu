@@ -44,7 +44,7 @@ public:
     enum class Page {
         kHome, kConversation, kSpeaking, kReading, kWords, kSchedule,
         kCalendar, kBookReader, kNotes, kTodo, kQuota, kInkSight,
-        kAnalysis, kProfile, kActivation, kCount
+        kAnalysis, kProfile, kActivation, kWelcome, kCount
     };
 
     EpaperDashboard();
@@ -73,6 +73,7 @@ public:
     void BookNext();
     void BookPrevious();
     bool IsHome() const { return page_ == Page::kHome; }
+    bool IsWelcome() const { return page_ == Page::kWelcome; }
     bool IsConversation() const { return page_ == Page::kConversation; }
     bool IsBookList() const { return page_ == Page::kReading; }
     bool IsBookOpen() const { return page_ == Page::kBookReader; }
@@ -180,6 +181,7 @@ private:
     std::string RenderAnalysis() const;
     std::string RenderProfile() const;
     std::string RenderSettings() const;
+    std::string RenderWelcome() const;
     void RenderMenu();
     static const char* PageName(Page page);
 };
