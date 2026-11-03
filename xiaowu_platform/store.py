@@ -251,6 +251,8 @@ class Store:
             columns = {row[1] for row in db.execute("PRAGMA table_info(devices)")}
             if "pending_refresh" not in columns:
                 db.execute("ALTER TABLE devices ADD COLUMN pending_refresh INTEGER NOT NULL DEFAULT 0")
+            if "storage_json" not in columns:
+                db.execute("ALTER TABLE devices ADD COLUMN storage_json TEXT")
             columns = {row[1] for row in db.execute("PRAGMA table_info(tasks)")}
             if "source" not in columns:
                 db.execute("ALTER TABLE tasks ADD COLUMN source TEXT NOT NULL DEFAULT 'openapi'")
@@ -1320,6 +1322,22 @@ class Store:
         with self.connect() as db:
             db.execute("UPDATE devices SET runtime_mode=?, last_seen_at=? WHERE device_id=?",
                        (mode, now_iso(), device_id))
+
+    def report_storage(self, device_id: str, snapshot: dict[str, Any]) -> None:
+        """设备上报 TF 卡存储快照（状态 + 各分类文件清单），供后台「TF 卡」面板读取。"""
+        with self.connect() as db:
+            db.execute("UPDATE devices SET storage_json=?, last_seen_at=? WHERE device_id=?",
+                       (json.dumps(snapshot, ensure_ascii=False), now_iso(), device_id))
+
+    def get_storage(self, device_id: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute("SELECT storage_json FROM devices WHERE device_id=?", (device_id,)).fetchone()
+        if not row or not row["storage_json"]:
+            return None
+        try:
+            return json.loads(row["storage_json"])
+        except (json.JSONDecodeError, TypeError):
+            return None
 
     def get_teacher_code(self, device_id: str, auth_code: str) -> dict[str, Any] | None:
         with self.connect() as db:

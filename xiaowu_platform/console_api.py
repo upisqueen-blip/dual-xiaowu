@@ -1278,6 +1278,25 @@ def device_runtime(mac: str, body: dict[str, Any] = {}, x_device_token: Annotate
     return {"ok": True}
 
 
+@router.post("/api/device/{mac}/storage")
+def device_storage(mac: str, body: dict[str, Any] = {}, x_device_token: Annotated[str | None, Header()] = None) -> dict[str, Any]:
+    """设备上报 TF 卡存储快照（本地录音 / 照片 / 小说 / 音频）。"""
+    mac = mac.strip().upper()
+    if not (x_device_token and store.verify_device_token(mac, x_device_token)):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "设备令牌无效")
+    store.report_storage(mac, body or {})
+    return {"ok": True}
+
+
+@router.get("/api/device/{mac}/storage")
+def get_device_storage(mac: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
+    """后台「TF 卡」面板读取设备最近一次上报的存储快照。"""
+    mac = mac.strip().upper()
+    if not store.user_owns(user_id, mac):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "无权访问该设备的 TF 卡")
+    return {"storage": store.get_storage(mac)}
+
+
 def _resolve_security_code(raw: str) -> tuple[str, str]:
     """把「乐鑫科技」/「688018」/「sh688018」解析成 (code, name)。"""
     from . import finance as _finance
