@@ -1734,12 +1734,12 @@ public:
         });
         inksight_server_ = InkSightClient::LoadServerUrl();
         // 一次性迁移：仅把历史上硬编码的旧内网 / NAS 地址迁到线上域名。
-        // 用 NVS 标记 server_migrated_v1 保证只跑一次——之后用户用 MCP
+        // 用 NVS 标记 server_mig_v1 保证只跑一次——之后用户用 MCP
         // self.epaper.set_inksight_server 设的任意本地地址（含 192.168.x.x）
         // 都不会被再次覆盖，重启后保留，方便本地联调。
         {
             Settings s("inksight", /*read_write=*/true);
-            if (!s.GetBool("server_migrated_v1", false)) {
+            if (!s.GetBool("server_mig_v1", false)) {
                 if (inksight_server_ == "http://res123.zapto.org:8090" ||
                     inksight_server_ == "res123.zapto.org:8090" ||
                     inksight_server_ == "http://nas.insane.vip:8080" ||
@@ -1764,7 +1764,7 @@ public:
                     ESP_LOGI(kTag, "Migrated XiaowuAI server to %s",
                              inksight_server_.c_str());
                 }
-                s.SetBool("server_migrated_v1", true);
+                s.SetBool("server_mig_v1", true);
             }
         }
         if (inksight_server_.empty()) {
