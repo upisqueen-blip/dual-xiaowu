@@ -5,6 +5,10 @@ import Link from "next/link";
 
 // 运营总览现在挂在 /center,API 走同域 /backend(由 next.config 反代到后端 8104)
 const BASE = "";
+// 双屏内容配置台地址：构建时由 next.config.mjs 的 env 字段注入
+// XIAOWU_CONTENT_CONSOLE_URL（已 trim、剥除尾部 /admin，如 https://dualcn.xiaowuai.vip）。
+// 前端直接跳转到该地址本身，缺失时回退相对路径 /admin。
+const CONTENT_CONSOLE_URL = process.env.NEXT_PUBLIC_CONTENT_CONSOLE_URL || "/admin";
 
 const tabs = [["overview","运营概览"],["creator-accounts","注册用户"],["developer-submissions","贡献应用"],["published-apps","已上线应用"],["devices","设备"],["tasks","内容任务"],["templates","内容模板"],["plugins","插件"],["developer-apps","API 应用"],["webhook-outbox","Webhook 队列"],["audit-logs","审计日志"]];
 function value(v) { if (v == null || v === "") return "—"; return typeof v === "object" ? JSON.stringify(v, null, 2) : String(v); }
@@ -38,7 +42,7 @@ export default function OperationsConsole() {
   }
   if(!token)return <main className="admin-login-page"><section className="admin-login-card"><img src={`${BASE}/logo.png`} alt="森穹小悟"/><small>PLATFORM ADMINISTRATION</small><h1>小悟众创管理后台</h1><p>查看注册用户、贡献应用与审核状态。</p><form onSubmit={login}><label>管理员账号<input name="username" autoComplete="username" required/></label><label>密码<input name="password" type="password" autoComplete="current-password" required/></label>{error&&<div className="error">{error}</div>}<button>登录管理后台</button></form></section></main>;
   const overview = !Array.isArray(data) ? data : {}, rows = Array.isArray(data) ? data : [];
-  return <main className="admin-app"><aside><div className="brand" style={{display:'flex',alignItems:'center',gap:10}}><img src={`${BASE}/logo.png`} alt="森穹小悟" width={34} height={34} style={{borderRadius:9,objectFit:'contain',background:'#fff',border:'1px solid #2b4036'}}/><div><span>森穹小悟</span><b>S3 OPERATIONS</b></div></div><nav><a href="/admin" className="cc-entry">双屏内容配置 →</a><Link href="/" className="dev-entry">创作者门户 →</Link>{tabs.map(([id,label])=><button className={tab===id?"active":""} key={id} onClick={()=>setTab(id)}>{label}</button>)}</nav><p>运营能力仅保留在 PC 端。小程序只负责用户内容管理。</p></aside><section>
+  return <main className="admin-app"><aside><div className="brand" style={{display:'flex',alignItems:'center',gap:10}}><img src={`${BASE}/logo.png`} alt="森穹小悟" width={34} height={34} style={{borderRadius:9,objectFit:'contain',background:'#fff',border:'1px solid #2b4036'}}/><div><span>森穹小悟</span><b>S3 OPERATIONS</b></div></div><nav><a href={CONTENT_CONSOLE_URL} className="cc-entry">双屏内容配置 →</a><Link href="/" className="dev-entry">创作者门户 →</Link>{tabs.map(([id,label])=><button className={tab===id?"active":""} key={id} onClick={()=>setTab(id)}>{label}</button>)}</nav><p>运营能力仅保留在 PC 端。小程序只负责用户内容管理。</p></aside><section>
     <header><div><small>OPEN PLATFORM / ADMIN</small><h1>{tabs.find(x=>x[0]===tab)?.[1]}</h1></div><div className="auth"><button onClick={()=>void load()}>刷新</button><button className="logout-admin" onClick={logout}>退出登录</button></div></header>
     {error&&<div className="error">{error}</div>}{loading&&<div className="loading">正在读取数据…</div>}
     {tab==="overview"&&!loading&&<div className="metrics"><Metric label="设备总数" value={overview.devices}/><Metric label="已有心跳" value={overview.seen_devices}/><Metric label="待下发任务" value={overview.queued_tasks}/><Metric label="已显示内容" value={overview.displayed_tasks}/></div>}
