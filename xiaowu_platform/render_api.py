@@ -55,6 +55,9 @@ def render(
     v: Optional[float] = Query(default=None),
     rssi: Optional[int] = Query(default=None),
     battery: Optional[int] = Query(default=None),
+    # 固件 A 屏请求历史上发的是 bat=（见 inksight_client.cc 的 Load），
+    # 后端只认 battery，导致黑白屏右上角电量一直画不出来。两个名字都收。
+    bat: Optional[int] = Query(default=None),
     x_device_token: Optional[str] = Header(default=None),
 ):
     # 裸帧（raw）判定：固件走原始帧时会显式带 bpp/colors（见 Load2bpp 与 7.3 寸
@@ -67,6 +70,8 @@ def render(
         screen = "B"
     else:
         screen = "A"
+    if battery is None and bat is not None:
+        battery = bat
     is_color = screen == "B"  # B 屏恒为彩色原始帧
     bpp = bpp or 2
     colors = colors or 4
@@ -74,7 +79,7 @@ def render(
 
     # 1) 无 MAC：未注册引导图
     if not mac:
-        guide = render_unregistered(w, h)
+        guide = render_unregistered(w, h, colors if is_color else 2)
         if is_color:
             return Response(content=_pack_raw(guide, colors, bpp), media_type="application/octet-stream",
                             headers={"X-Device-Unregistered": "no-mac"})
@@ -84,7 +89,7 @@ def render(
     mac = mac.strip().upper()
     # 2) 设备未注册（无令牌可领）→ 重新配网引导
     if not store.device_exists(mac):
-        guide = render_unregistered(w, h)
+        guide = render_unregistered(w, h, colors if is_color else 2)
         if is_color:
             return Response(content=_pack_raw(guide, colors, bpp), media_type="application/octet-stream",
                             headers={"X-Device-Unregistered": "no-mac"})
@@ -107,7 +112,8 @@ def render(
     # 4) 未绑定 → 带配对码引导图
     if owner is None:
         pair_code = store.ensure_claim_code(mac)
-        guide = render_unbound(mac, w, h, pair_code)
+        guide = render_unbound(mac, w, h, pair_code,
+                               colors if is_color else 2)
         # X-Pair-Code 供固件打日志 / 排障用（屏幕上是图，日志里要能读到码）
         headers = {"X-Device-Unbound": "1", "X-Pair-Code": pair_code}
         if is_color:
@@ -142,9 +148,13 @@ def render(
             out_bytes = _pack_raw(img, eff_colors, bpp)
             out_media = "application/octet-stream"
     except Exception as exc:  # noqa: BLE001
-        img = render_error(mac, w, h)
-        out_bytes = image_to_bmp_bytes(img)
-        out_media = "image/bmp"
+        img = render_error(mac, w, h, colors if is_color else 2)
+        if is_color:
+            out_bytes = _pack_raw(img, colors, bpp)
+            out_media = "application/octet-stream"
+        else:
+            out_bytes = image_to_bmp_bytes(img)
+            out_media = "image/bmp"
 
     elapsed_ms = int((datetime.now(UTC) - start_time).total_seconds() * 1000)
     headers = {

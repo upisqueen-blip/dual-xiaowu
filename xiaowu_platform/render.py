@@ -68,6 +68,22 @@ def _load_cjk(size: int, bold: bool = False):
     return ImageFont.load_default()
 
 
+def _load_serif(size: int, bold: bool = False):
+    """加载中文宋体（欢迎页/引导页用，观感更正式）；缺字体时回落黑体。"""
+    candidates: list[Path] = [
+        _FONT_DIR / ("NotoSerifSC-Bold.ttf" if bold else "NotoSerifSC-Regular.ttf"),
+        Path("C:/Windows/Fonts/simsun.ttc"),
+        Path("/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc"),
+    ]
+    for path in candidates:
+        try:
+            if path.is_file():
+                return ImageFont.truetype(str(path), size)
+        except Exception:  # noqa: BLE001
+            continue
+    return _load_cjk(size, bold=bold)
+
+
 def image_to_bmp_bytes(img: Image.Image) -> bytes:
     buf = io.BytesIO()
     img.save(buf, format="BMP")
@@ -136,6 +152,18 @@ def _palette_p_image(w: int, h: int, colors: int = 4) -> Image.Image:
             palette += [255, 255, 255]
     img.putpalette(palette)
     return img
+
+
+def _new_canvas(w: int, h: int, colors: int = 2) -> Image.Image:
+    """白底画布：彩色屏必须用调色板图（索引 1 = 白），不能画在 mode "1" 上。
+
+    1bit 图打 2bpp 裸帧时会先 convert("P")，PIL 给白底的调色板索引是 255，
+    与 image_to_raw_2bpp 里的 &0x03 叠加正好等于 3（红）——这就是「引导图在
+    彩色屏上整屏泛红」的根因。
+    """
+    if colors >= 3:
+        return _palette_p_image(w, h, colors)
+    return Image.new("1", (w, h), 1)
 
 
 # ── 通用绘制助手 ─────────────────────────────────────────────
@@ -1126,38 +1154,65 @@ def render_dual_screen(mac: str, screen: str, w: int, h: int, colors: int,
         return img
 
 
-def render_error(mac: str, screen_w: int, screen_h: int) -> Image.Image:
-    img = Image.new("1", (screen_w, screen_h), 1)
+def render_error(mac: str, screen_w: int, screen_h: int,
+                 colors: int = 2) -> Image.Image:
+    img = _new_canvas(screen_w, screen_h, colors)
     draw = ImageDraw.Draw(img)
     font = _load_cjk(max(14, int(18 * scale_of(screen_w))))
-    draw.text((int(14 * scale_of(screen_w)), int(70 * scale_of(screen_w))),
-              "渲染失败", fill=0, font=font)
+    text = "渲染失败"
+    draw.text((max(0, (screen_w - _text_w(draw, text, font)) // 2),
+               int(screen_h * 0.42)), text, fill=0, font=font)
     return img
 
 
-def render_unbound(mac: str, screen_w: int, screen_h: int, pair_code: str) -> Image.Image:
-    """设备未绑定：展示配对码引导图（黑白）。"""
+def render_unbound(mac: str, screen_w: int, screen_h: int, pair_code: str,
+                   colors: int = 2) -> Image.Image:
+    """设备未绑定：欢迎 + 配对码引导页（居中排版，黑白屏与彩色屏同一套版式）。
+
+    A 屏（1bit BMP）和 B 屏（2bpp 裸帧）共用本函数，画布必须按目标屏选择：
+    colors>=3 时走调色板图，否则白底会被打包成红色（见 _new_canvas）。
+    """
     scale = scale_of(screen_w)
-    img = Image.new("1", (screen_w, screen_h), 1)
+    img = _new_canvas(screen_w, screen_h, colors)
     draw = ImageDraw.Draw(img)
-    font_title = _load_cjk(max(16, int(24 * scale)))
-    font_body = _load_cjk(max(13, int(18 * scale)))
-    draw.text((int(14 * scale), int(40 * scale)), "扫码绑定设备", fill=0, font=font_title)
-    draw.text((int(14 * scale), int(84 * scale)), f"配对码：{pair_code}", fill=0, font=font_body)
-    draw.text((int(14 * scale), int(120 * scale)), "打开小程序或内容后台", fill=0, font=font_body)
-    draw.text((int(14 * scale), int(150 * scale)), "输入配对码完成绑定", fill=0, font=font_body)
+
+    font_title = _load_serif(max(18, int(23 * scale)))
+    font_code = _load_serif(max(20, int(26 * scale)), bold=True)
+    font_hint = _load_serif(max(12, int(14 * scale)))
+
+    title = "欢迎使用 XiaoWuAI"
+    code_line = f"配对码：{pair_code}" if pair_code else "正在生成配对码…"
+    hint = "请在设备配置页输入配对码完成绑定"
+
+    # (文本, 字体, 纵向位置比例)：三行垂直居中，保持与黑白屏一致的分层。
+    rows = (
+        (title, font_title, 0.30),
+        (code_line, font_code, 0.45),
+        (hint, font_hint, 0.64),
+    )
+    for text, font, ratio in rows:
+        text_w = _text_w(draw, text, font)
+        draw.text((max(0, (screen_w - text_w) // 2), int(screen_h * ratio)),
+                  text, fill=0, font=font)
     return img
 
 
-def render_unregistered(screen_w: int, screen_h: int) -> Image.Image:
+def render_unregistered(screen_w: int, screen_h: int,
+                        colors: int = 2) -> Image.Image:
     """无 MAC（未配网/未注册）：展示重新配网引导。"""
     scale = scale_of(screen_w)
-    img = Image.new("1", (screen_w, screen_h), 1)
+    img = _new_canvas(screen_w, screen_h, colors)
     draw = ImageDraw.Draw(img)
-    font_title = _load_cjk(max(16, int(22 * scale)))
-    font_body = _load_cjk(max(12, int(16 * scale)))
-    draw.text((int(14 * scale), int(50 * scale)), "设备未注册", fill=0, font=font_title)
-    draw.text((int(14 * scale), int(96 * scale)), "请先完成配网与注册", fill=0, font=font_body)
+    font_title = _load_serif(max(16, int(22 * scale)))
+    font_body = _load_serif(max(12, int(16 * scale)))
+    rows = (
+        ("设备未注册", font_title, 0.34),
+        ("请先完成配网与注册", font_body, 0.54),
+    )
+    for text, font, ratio in rows:
+        text_w = _text_w(draw, text, font)
+        draw.text((max(0, (screen_w - text_w) // 2), int(screen_h * ratio)),
+                  text, fill=0, font=font)
     return img
 
 
