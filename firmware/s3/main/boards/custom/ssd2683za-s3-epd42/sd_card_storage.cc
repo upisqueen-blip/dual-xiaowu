@@ -18,7 +18,7 @@
 
 namespace {
 constexpr const char* kTag = "SdCardStorage";
-constexpr const char* kRoot = "/sdcard/xiaozhi";
+constexpr const char* kRoot = "/sdcard/xiaowu";
 
 struct WavHeader {
     char riff[4] = {'R', 'I', 'F', 'F'};
@@ -38,11 +38,11 @@ struct WavHeader {
 
 void EnsureDirectories() {
     mkdir(kRoot, 0775);
-    mkdir("/sdcard/xiaozhi/images", 0775);
-    mkdir("/sdcard/xiaozhi/audio", 0775);
-    mkdir("/sdcard/xiaozhi/recordings", 0775);
-    mkdir("/sdcard/xiaozhi/books", 0775);
-    mkdir("/sdcard/xiaozhi/cache", 0775);
+    mkdir("/sdcard/xiaowu/images", 0775);
+    mkdir("/sdcard/xiaowu/audio", 0775);
+    mkdir("/sdcard/xiaowu/recordings", 0775);
+    mkdir("/sdcard/xiaowu/books", 0775);
+    mkdir("/sdcard/xiaowu/cache", 0775);
 }
 }  // namespace
 
@@ -196,7 +196,7 @@ bool SdCardStorage::RecordWav(AudioCodec* codec, const std::string& name, int se
     // Recover if the user inserted a prepared card without the application
     // directory or removed the recordings directory on a PC.
     mkdir(kRoot, 0775);
-    mkdir("/sdcard/xiaozhi/recordings", 0775);
+    mkdir("/sdcard/xiaowu/recordings", 0775);
     const auto path = Path("recordings", name);
     if (path.empty()) { error = "invalid file name"; return false; }
     const std::string temp = path + ".tmp";

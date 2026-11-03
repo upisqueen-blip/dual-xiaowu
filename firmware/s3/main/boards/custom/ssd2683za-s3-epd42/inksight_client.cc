@@ -1131,3 +1131,41 @@ bool InkSightClient::ReportRuntimeMode(NetworkInterface* network,
     if (error) *error = message;
     return false;
 }
+
+bool InkSightClient::ReportStorage(NetworkInterface* network,
+                                  const std::string& server,
+                                  const std::string& device_id,
+                                  const std::string& snapshot_json,
+                                  std::string* error) {
+    if (error) error->clear();
+    if (!network || server.empty() || device_id.empty() || snapshot_json.empty()) {
+        if (error) *error = "no network / server / snapshot";
+        return false;
+    }
+    const std::string token = DeviceToken(network, server, device_id);
+    if (token.empty()) {
+        if (error) *error = "no device token";
+        return false;
+    }
+    auto http = network->CreateHttp(-1);
+    if (!http) {
+        if (error) *error = "http create failed";
+        return false;
+    }
+    http->SetTimeout(8000);
+    http->SetKeepAlive(false);
+    http->SetHeader("Content-Type", "application/json");
+    http->SetHeader("X-Device-Token", token);
+    http->SetContent(snapshot_json);
+    const std::string url = NormalizeServer(server) + "/api/device/" + device_id + "/storage";
+    if (!http->Open("POST", url)) {
+        if (error) *error = "connect failed";
+        return false;
+    }
+    const int status = http->GetStatusCode();
+    if (status >= 200 && status < 300) return true;
+    char message[48];
+    std::snprintf(message, sizeof(message), "storage HTTP %d", status);
+    if (error) *error = message;
+    return false;
+}

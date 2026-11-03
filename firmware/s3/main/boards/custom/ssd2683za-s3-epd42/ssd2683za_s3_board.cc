@@ -146,6 +146,48 @@ private:
         }
     }
 
+    // 把 TF 卡当前内容快照（各分类文件清单）POST 给后端「本地 TF 卡」面板。
+    // 快照 JSON：{"mounted":true,"status":"...","categories":{"images":[...],"audio":[...],"books":[...],"recordings":[...]}}
+    void ReportTfStorage() {
+        if (inksight_server_.empty() || GetNetwork() == nullptr) return;
+        if (!storage_.mounted()) {
+            ESP_LOGI(kTag, "TF 卡未挂载，跳过存储上报");
+            return;
+        }
+        cJSON* root = cJSON_CreateObject();
+        cJSON_AddBoolToObject(root, "mounted", true);
+        cJSON_AddStringToObject(root, "status", storage_.Status().c_str());
+        cJSON* cats = cJSON_CreateObject();
+        for (const char* cat : {"images", "audio", "books", "recordings"}) {
+            cJSON* arr = cJSON_CreateArray();
+            std::string listing = storage_.List(cat);
+            if (!listing.empty() && listing != "(empty)") {
+                size_t start = 0;
+                while (true) {
+                    size_t nl = listing.find('\n', start);
+                    const size_t len = (nl == std::string::npos) ? std::string::npos : nl - start;
+                    std::string name = listing.substr(start, len);
+                    if (!name.empty()) cJSON_AddItemToArray(arr, cJSON_CreateString(name.c_str()));
+                    if (nl == std::string::npos) break;
+                    start = nl + 1;
+                }
+            }
+            cJSON_AddItemToObject(cats, cat, arr);
+        }
+        cJSON_AddItemToObject(root, "categories", cats);
+        char* payload = cJSON_PrintUnformatted(root);
+        std::string snapshot = payload ? payload : "{}";
+        if (payload) free(payload);
+        cJSON_Delete(root);
+        std::string error;
+        if (!InkSightClient::ReportStorage(
+                GetNetwork(), inksight_server_, SystemInfo::GetMacAddress(), snapshot, &error)) {
+            ESP_LOGW(kTag, "TF 卡存储上报失败: %s", error.c_str());
+        } else {
+            ESP_LOGI(kTag, "TF 卡存储已上报后台");
+        }
+    }
+
     int EffectiveRefreshMinutes() const {
         Settings settings("inksight", false);
         const int clr = settings.GetInt("clr_ref_min", 30);
@@ -969,13 +1011,14 @@ private:
             static_cast<uint32_t>((esp_timer_get_time() / 1000) & 0xffffffffU);
         std::snprintf(filename, sizeof(filename), "recording_%lu.wav",
                       static_cast<unsigned long>(recording_id));
-        ESP_LOGI(kTag, "Recording started: /xiaozhi/recordings/%s (10 seconds)",
+        ESP_LOGI(kTag, "Recording started: /xiaowu/recordings/%s (10 seconds)",
                  filename);
         std::string error;
         const bool ok = self->storage_.RecordWav(
             self->GetAudioCodec(), filename, 10, error);
         if (ok) {
-            ESP_LOGI(kTag, "Recording saved: /xiaozhi/recordings/%s", filename);
+            ESP_LOGI(kTag, "Recording saved: /xiaowu/recordings/%s", filename);
+            self->ReportTfStorage();
         } else {
             ESP_LOGE(kTag, "Recording failed: %s", error.c_str());
         }
@@ -1042,9 +1085,9 @@ private:
             // empty directory, wrong extension) is visible instead of a
             // generic failure.
             const std::string listing = storage_.List("books");
-            ESP_LOGW(kTag, "TF book scan empty: /sdcard/xiaozhi/books -> %s",
+            ESP_LOGW(kTag, "TF book scan empty: /sdcard/xiaowu/books -> %s",
                      listing.c_str());
-            std::string message = "没有找到 TXT 电子书\n\n请放入 /xiaozhi/books\n\n";
+            std::string message = "没有找到 TXT 电子书\n\n请放入 /xiaowu/books\n\n";
             message += "目录状态: ";
             message += listing;
             display_->dashboard().ShowBookError(message);
@@ -1076,7 +1119,7 @@ private:
                         bytes.size() - offset));
     }
 
-    // Loads a [[img:...]] illustration PNG from /xiaozhi/books. PNG only;
+    // Loads a [[img:...]] illustration PNG from /xiaowu/books. PNG only;
     // the LVGL JPEG decoders are not enabled in this build.
     std::unique_ptr<LvglImage> LoadBookImage(const std::string& name) {
         std::vector<uint8_t> bytes;
@@ -1615,7 +1658,7 @@ private:
                     [this](const PropertyList& p) -> ReturnValue {
                         return storage_.List(p["category"].value<std::string>());
                     });
-        mcp.AddTool("self.epaper.show_sd_image", "在 FPC2 FPC2 彩色屏显示 TF 卡 /xiaozhi/images 中的 JPG/JPEG 图片。",
+        mcp.AddTool("self.epaper.show_sd_image", "在 FPC2 FPC2 彩色屏显示 TF 卡 /xiaowu/images 中的 JPG/JPEG 图片。",
                     PropertyList({Property("name", kPropertyTypeString)}),
                     [this](const PropertyList& p) -> ReturnValue {
                         const std::string name = p["name"].value<std::string>();
@@ -1639,14 +1682,14 @@ private:
                         return std::string("当前固件未启用 FPC2 彩屏");
 #endif
                     });
-        mcp.AddTool("self.audio.play_sd_wav", "播放 TF 卡 /xiaozhi/audio 中的单声道 16-bit 24kHz PCM WAV。",
+        mcp.AddTool("self.audio.play_sd_wav", "播放 TF 卡 /xiaowu/audio 中的单声道 16-bit 24kHz PCM WAV。",
                     PropertyList({Property("name", kPropertyTypeString)}),
                     [this](const PropertyList& p) -> ReturnValue {
                         std::string error;
                         return storage_.PlayWav(GetAudioCodec(), p["name"].value<std::string>(), error)
                                    ? ReturnValue(true) : ReturnValue(error);
                     });
-        mcp.AddTool("self.audio.record_sd_wav", "录音到 TF 卡 /xiaozhi/recordings，seconds 为 1~60 秒。",
+        mcp.AddTool("self.audio.record_sd_wav", "录音到 TF 卡 /xiaowu/recordings，seconds 为 1~60 秒。",
                     PropertyList({Property("name", kPropertyTypeString),
                                   Property("seconds", kPropertyTypeInteger, 1, 60)}),
                     [this](const PropertyList& p) -> ReturnValue {
@@ -1690,35 +1733,39 @@ public:
                 bytes.size() - offset);
         });
         inksight_server_ = InkSightClient::LoadServerUrl();
-        // Upgrade devices that still have a former compile-time default
-        // persisted in NVS. Explicitly configured third-party URLs remain
-        // untouched.
-        // 固件默认地址已切到线上域名，下面这些历史值（旧 NAS 域名 / 办公点内网
-        // IP + 8092/8104 端口）在已出货设备里普遍存在，开机时统一迁移到
-        // INKSIGHT_DEFAULT_SERVER_URL（= https://dual.xiaowuai.vip/backend）。
-        if (inksight_server_ == "http://res123.zapto.org:8090" ||
-            inksight_server_ == "res123.zapto.org:8090" ||
-            inksight_server_ == "http://nas.insane.vip:8080" ||
-            inksight_server_ == "nas.insane.vip:8080" ||
-            inksight_server_ == "http://nas.insane.vip:8090" ||
-            inksight_server_ == "nas.insane.vip:8090" ||
-            inksight_server_ == "http://nas.insane.vip:8091" ||
-            inksight_server_ == "nas.insane.vip:8091" ||
-            inksight_server_ == "http://nas.insane.vip:8092" ||
-            inksight_server_ == "nas.insane.vip:8092" ||
-            // 旧编译期默认值：办公点内网 IP + 8080/8092/8104 历史端口。
-            inksight_server_ == "http://192.168.1.4:8092" ||
-            inksight_server_ == "192.168.1.4:8092" ||
-            inksight_server_ == "http://192.168.1.4:8104" ||
-            inksight_server_ == "192.168.1.4:8104" ||
-            inksight_server_ == "http://192.168.101.69:8092" ||
-            inksight_server_ == "192.168.101.69:8092" ||
-            inksight_server_ == "http://192.168.101.69:8104" ||
-            inksight_server_ == "192.168.101.69:8104") {
-            inksight_server_ = INKSIGHT_DEFAULT_SERVER_URL;
-            InkSightClient::SaveServerUrl(inksight_server_);
-            ESP_LOGI(kTag, "Migrated XiaowuAI server to %s",
-                     inksight_server_.c_str());
+        // 一次性迁移：仅把历史上硬编码的旧内网 / NAS 地址迁到线上域名。
+        // 用 NVS 标记 server_migrated_v1 保证只跑一次——之后用户用 MCP
+        // self.epaper.set_inksight_server 设的任意本地地址（含 192.168.x.x）
+        // 都不会被再次覆盖，重启后保留，方便本地联调。
+        {
+            Settings s("inksight", /*read_write=*/true);
+            if (!s.GetBool("server_migrated_v1", false)) {
+                if (inksight_server_ == "http://res123.zapto.org:8090" ||
+                    inksight_server_ == "res123.zapto.org:8090" ||
+                    inksight_server_ == "http://nas.insane.vip:8080" ||
+                    inksight_server_ == "nas.insane.vip:8080" ||
+                    inksight_server_ == "http://nas.insane.vip:8090" ||
+                    inksight_server_ == "nas.insane.vip:8090" ||
+                    inksight_server_ == "http://nas.insane.vip:8091" ||
+                    inksight_server_ == "nas.insane.vip:8091" ||
+                    inksight_server_ == "http://nas.insane.vip:8092" ||
+                    inksight_server_ == "nas.insane.vip:8092" ||
+                    // 旧编译期默认值：办公点内网 IP + 8080/8092/8104 历史端口。
+                    inksight_server_ == "http://192.168.1.4:8092" ||
+                    inksight_server_ == "192.168.1.4:8092" ||
+                    inksight_server_ == "http://192.168.1.4:8104" ||
+                    inksight_server_ == "192.168.1.4:8104" ||
+                    inksight_server_ == "http://192.168.101.69:8092" ||
+                    inksight_server_ == "192.168.101.69:8092" ||
+                    inksight_server_ == "http://192.168.101.69:8104" ||
+                    inksight_server_ == "192.168.101.69:8104") {
+                    inksight_server_ = INKSIGHT_DEFAULT_SERVER_URL;
+                    InkSightClient::SaveServerUrl(inksight_server_);
+                    ESP_LOGI(kTag, "Migrated XiaowuAI server to %s",
+                             inksight_server_.c_str());
+                }
+                s.SetBool("server_migrated_v1", true);
+            }
         }
         if (inksight_server_.empty()) {
             inksight_server_ = INKSIGHT_DEFAULT_SERVER_URL;
@@ -1733,13 +1780,14 @@ public:
         } else {
             ESP_LOGI(kTag, "XiaowuAI server (NVS): %s", inksight_server_.c_str());
         }
-        // 已配置 InkSight/双屏：开机直接等网络图，跳过首页菜单（避免双闪）。
-        // 首刷若拿不到图（断网），ColorRefreshTask 会兜底回退首页，避免白屏。
-        const bool boot_to_inksight = !inksight_server_.empty();
-        if (!boot_to_inksight) {
-            display_->ShowBootHome();
+        // A 屏首屏统一显示欢迎页（用户要求：配网/激活后默认欢迎页，引导去后台配置屏幕内容；
+        // 按 OK 进入功能菜单）。B 屏网络图在并行任务中拉取并刷新，两块屏互不干扰。
+        // 未配置 InkSight 时同样显示欢迎页。
+        display_->ShowBootHome();
+        if (!inksight_server_.empty()) {
+            ESP_LOGI(kTag, "已配置 XiaowuAI/双屏：A 屏显示欢迎页，B 屏并行拉取网络图");
         } else {
-            ESP_LOGI(kTag, "已配置 XiaowuAI/双屏：开机跳过首页菜单，直接等网络图");
+            ESP_LOGI(kTag, "未配置 XiaowuAI：A 屏显示欢迎页");
         }
         display_->dashboard().SetInkSightShow(
             [this](bool initial_full) {
@@ -1795,6 +1843,8 @@ public:
                         // board build, then let an interval wake refresh once
                         // before it reports asleep and enters deep sleep.
                         ReportRuntimeMode(true);
+                        // TF 卡联网就绪后上报一次存储快照，供后台「本地 TF 卡」面板读取。
+                        ReportTfStorage();
                         if (todo_web_ && !todo_web_->IsRunning()) {
                             todo_web_->Start();
                         }

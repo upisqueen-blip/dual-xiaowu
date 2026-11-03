@@ -81,6 +81,14 @@ public:
                                   bool awake = true,
                                   std::string* error = nullptr);
 
+    // 上报 TF 卡存储快照，供后台「本地 TF 卡」面板读取：
+    // POST /api/device/<mac>/storage，body 为设备构造的 JSON 快照。
+    static bool ReportStorage(NetworkInterface* network,
+                             const std::string& server,
+                             const std::string& device_id,
+                             const std::string& snapshot_json,
+                             std::string* error = nullptr);
+
     // 解除本设备与账号的绑定（用于重新配对）：POST /api/device/<mac>/unbind，
     // 成功后清本地 device_token。返回 false 不一定仍绑定——后端 404 如果是
     // "Not Found"（老后端没有该路由）会如实返回 false，提示需先升级后端。
