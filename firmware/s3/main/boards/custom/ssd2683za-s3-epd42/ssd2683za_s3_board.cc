@@ -151,7 +151,12 @@ private:
     void ReportTfStorage() {
         if (inksight_server_.empty() || GetNetwork() == nullptr) return;
         if (!storage_.mounted()) {
-            ESP_LOGI(kTag, "TF 卡未挂载，跳过存储上报");
+            const std::string& me = storage_.MountError();
+            if (me.empty()) {
+                ESP_LOGI(kTag, "TF 卡未挂载，跳过存储上报");
+            } else {
+                ESP_LOGI(kTag, "TF 卡未挂载，跳过存储上报（原因：%s）", me.c_str());
+            }
             return;
         }
         cJSON* root = cJSON_CreateObject();
@@ -1799,7 +1804,13 @@ public:
         ESP_LOGI(kTag, "电源模式: %s（KEY+ 长按已改为重新配对；电源模式请用 MCP self.epaper.set_power_mode）",
                  PowerModeName(power_mode_));
         InitializeButton();
-        storage_.Mount();  // Card absence must never prevent normal voice/display startup.
+        if (storage_.Mount()) {
+            ESP_LOGI(kTag, "TF 卡挂载成功: %s", storage_.Status().c_str());
+        } else {
+            const std::string& me = storage_.MountError();
+            ESP_LOGI(kTag, "TF 卡挂载失败: %s",
+                     me.empty() ? "未插入 / SPI 初始化失败" : me.c_str());
+        }
         InitializeDashboardTools();
         todo_web_ = std::make_unique<EpaperTodoWeb>([this](const char* kind) {
             Application::GetInstance().Schedule([this, kind = std::string(kind)]() {
