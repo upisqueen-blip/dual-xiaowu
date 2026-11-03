@@ -19,10 +19,15 @@ if (!backend) {
   );
 }
 
+// 路由前缀由 .env 的 NEXT_PUBLIC_BASE_PATH 决定，同一份代码可挂在两种位置：
+//   ""        → 独立二级域名根路径（https://dualcon.xiaowuai.vip/）
+//   "/admin"  → 门户反代子路径（https://dual.xiaowuai.vip/admin，默认值）
+// basePath 会统一作用于路由、/_next 静态资源、<Link>；但 <img src> 这类原生标签
+// 不会被自动加前缀，页面内走 lib/api 的 BASE_PATH 手动拼接。
+const basePath = (process.env.NEXT_PUBLIC_BASE_PATH ?? "/admin").trim().replace(/\/$/, "");
+
 const nextConfig: NextConfig = {
-  // 对外挂在 dual.xiaowuai.vip/admin 下；basePath 让路由、/_next 资源、Link 统一带 /admin 前缀。
-  // 注意：<img src="/..."> 这类原生标签不会被自动加前缀，已在页面内手动写成 /admin/...。
-  basePath: "/admin",
+  basePath,
   // Next.js 15+ 默认拦截"跨域"dev 资源（含 HMR WebSocket）。用 127.0.0.1 访问时
   // 会被判定为跨域，导致 /_next/hmr 握手被拒、页面 hydration 永远挂起（一直转圈）。
   // 允许的 dev 来源（仅开发期跨域/HMR 校验用），可用 .env 的 ALLOWED_DEV_ORIGINS 覆盖（逗号分隔）。
@@ -39,11 +44,13 @@ const nextConfig: NextConfig = {
     if (!backend) return [];
     return [{ source: "/api/:path*", destination: `${backend}/api/:path*` }];
   },
-  // basePath 为 /admin 时，直接访问本实例根路径 / 会 404（Next 不会自动补前缀）。
+  // basePath 非空时，直接访问本实例根路径 / 会 404（Next 不会自动补前缀）。
   // 这里加一条「不受 basePath 影响」的跳转：/ -> /admin，
   // 避免本地直接开 :8094 看到空白 404，误以为服务没起来 / 门户丢了。
+  // basePath 为空（独立域名根路径部署）时不能加，否则 / -> / 死循环。
   async redirects() {
-    return [{ source: "/", destination: "/admin", permanent: false, basePath: false }];
+    if (!basePath) return [];
+    return [{ source: "/", destination: basePath, permanent: false, basePath: false }];
   },
   // HTML 每次回源校验，避免构建后旧 HTML 引用已删除的 chunk（表现「布局全乱」）。
   async headers() {

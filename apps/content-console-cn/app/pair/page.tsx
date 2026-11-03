@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { AlertTriangle, Check, KeyRound, LoaderCircle, ShieldCheck, Trash2, X } from "lucide-react";
-import { api, getToken } from "@/lib/api";
+import { api, BASE_PATH, getToken } from "@/lib/api";
 
 type PairScope = { key: string; text: string };
 type PairDevice = { device_id: string; nickname?: string; model?: string };
@@ -148,7 +148,7 @@ export default function PairPage() {
       <div className="pair-page">
         <div className="pair-box">
           <div className="pair-brand">
-            <img src="/admin/logo.png" alt="" />
+            <img src={`${BASE_PATH}/logo.png`} alt="" />
             <div>
               <b>森穹小悟</b>
               <span>DEVICE AUTHORIZATION</span>
@@ -170,7 +170,7 @@ export default function PairPage() {
     <div className="pair-page">
       <div className="pair-wrap">
         <div className="pair-brand">
-          <img src="/admin/logo.png" alt="" />
+          <img src={`${BASE_PATH}/logo.png`} alt="" />
           <div>
             <b>森穹小悟</b>
             <span>DEVICE AUTHORIZATION</span>

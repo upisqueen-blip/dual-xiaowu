@@ -9,7 +9,7 @@ import {
   WalletCards, Truck, Wifi, X, Compass,
   Coins, TrendingUp,
 } from "lucide-react";
-import { api, authHeaders, clearToken, getToken, setToken } from "@/lib/api";
+import { api, authHeaders, BASE_PATH, clearToken, getToken, setToken } from "@/lib/api";
 
 type SceneKey = string;
 type NavKey = "dashboard" | "scenes" | "screens" | "content" | "apps" | "financeStocks" | "devices" | "members" | "profile" | "connectors" | "settings" | "guide";
@@ -292,7 +292,7 @@ export default function DualConsole() {
   return (
     <div className="shell">
       <aside className="sidebar">
-        <div className="brand"><img className="brand-mark" src="/admin/logo.png" alt="森穹小悟"/><div><strong>森穹小悟</strong><span>DUAL DISPLAY</span></div></div>
+        <div className="brand"><img className="brand-mark" src={`${BASE_PATH}/logo.png`} alt="森穹小悟"/><div><strong>森穹小悟</strong><span>DUAL DISPLAY</span></div></div>
         <div className="nav-label">工作台</div>
         <nav>
           {navItems.map((item) => <button key={item.key} className={nav === item.key ? "active" : ""} onClick={() => setNav(item.key)}><item.icon size={18}/>{item.label}{item.key === "devices" && devices.length > 0 ? <em>{devices.length}</em> : null}</button>)}
@@ -2601,7 +2601,7 @@ function CourseTableEditor({ value, onChange, notify }: { value: CourseTable; on
       <div className="modal-backdrop" onMouseDown={(e) => e.currentTarget === e.target && setEdit(null)}>
         <div className="modal">
           <button className="modal-close" onClick={() => setEdit(null)}><X size={18} /></button>
-          <img className="modal-brand" src="/admin/logo.png" alt="森穹小悟"/>
+          <img className="modal-brand" src={`${BASE_PATH}/logo.png`} alt="森穹小悟"/>
           <h2>{`周${TT_DAYS[edit.day]} 第${edit.period + 1}节`}</h2>
           <p>填写课程信息，留空即删除该格。</p>
           <label>课程名称<input className="cs-input" type="text" maxLength={39} value={name} onChange={(e) => setName(e.target.value)} placeholder="如：高等数学" /></label>
@@ -3230,7 +3230,7 @@ function AlbumEditor({ value, onChange, notify }: { value: AlbumState; onChange:
     const fd = new FormData();
     fd.append("file", file);
     const tok = getToken();
-    const res = await fetch("/admin/api/uploads", { method: "POST", headers: tok ? { Authorization: `Bearer ${tok}` } : {}, body: fd });
+    const res = await fetch(`${BASE_PATH}/api/uploads`, { method: "POST", headers: tok ? { Authorization: `Bearer ${tok}` } : {}, body: fd });
     if (!res.ok) throw new Error(`上传失败 ${res.status}`);
     const j = await res.json();
     return { id: j.id as string, url: j.url as string, caption: "" };
@@ -3376,4 +3376,4 @@ function FamilyWeekScreen({ content }: { content: ContentState }) {
   </div>;
 }
 
-function Modal({title,subtitle,onClose,children}:{title:string;subtitle:string;onClose:()=>void;children:React.ReactNode}){return <div className="modal-backdrop" onMouseDown={e=>e.currentTarget===e.target&&onClose()}><div className="modal"><button className="modal-close" onClick={onClose}><X size={18}/></button><img className="modal-brand" src="/admin/logo.png" alt="森穹小悟"/><h2>{title}</h2><p>{subtitle}</p><div className="modal-body">{children}</div></div></div>}
+function Modal({title,subtitle,onClose,children}:{title:string;subtitle:string;onClose:()=>void;children:React.ReactNode}){return <div className="modal-backdrop" onMouseDown={e=>e.currentTarget===e.target&&onClose()}><div className="modal"><button className="modal-close" onClick={onClose}><X size={18}/></button><img className="modal-brand" src={`${BASE_PATH}/logo.png`} alt="森穹小悟"/><h2>{title}</h2><p>{subtitle}</p><div className="modal-body">{children}</div></div></div>}
