@@ -431,7 +431,8 @@ function FinanceWatchlist({ user, notify, device, embedded }: { user: User | nul
   }
 
   const quoteByName = new Map(quotes.map((q) => [q.code, q]));
-  const klineSrc = klineCode ? `/api/finance/kline/image?code=${encodeURIComponent(klineCode)}&days=60&w=400&h=300&colors=4&t=${klineTs}` : "";
+  // 图片走原生 <img src>，Next 不会自动补 basePath，必须手动拼 BASE_PATH（线上挂在 /admin 下）
+  const klineSrc = klineCode ? `${BASE_PATH}/api/finance/kline/image?code=${encodeURIComponent(klineCode)}&days=60&w=400&h=300&colors=4&t=${klineTs}` : "";
 
   if (!user) return <EmptyState icon={<TrendingUp />} title="登录后管理理财自选" text="自选股按账号保存，可一键写入设备双屏。" action="请先登录" onAction={() => notify("请从右上角登录")} />;
   return <>
@@ -1287,15 +1288,15 @@ function FinanceModePreview({ kind, mode }: { kind: "a" | "b"; mode: string }) {
 
   // 大盘全景(A) / 板块动向(B)：展示后端实时渲染的墨水屏画面（与设备一致）
   if (kind === "a" && mode === "finance-market") {
-    return <div className="kline-full"><img className="kline-full-img" alt="大盘全景" src={`/api/preview?persona=DUAL_A&w=400&h=300&sceneKey=finance&aMode=finance-market`} /></div>;
+    return <div className="kline-full"><img className="kline-full-img" alt="大盘全景" src={`${BASE_PATH}/api/preview?persona=DUAL_A&w=400&h=300&sceneKey=finance&aMode=finance-market`} /></div>;
   }
   if (kind === "b" && mode === "finance-sectors") {
-    return <div className="kline-full"><img className="kline-full-img" alt="板块动向" src={`/api/preview?persona=DUAL_B&w=400&h=300&colors=4&sceneKey=finance&bMode=finance-sectors`} /></div>;
+    return <div className="kline-full"><img className="kline-full-img" alt="板块动向" src={`${BASE_PATH}/api/preview?persona=DUAL_B&w=400&h=300&colors=4&sceneKey=finance&bMode=finance-sectors`} /></div>;
   }
   if (err) return <div className="eink-screen"><div className="eink-title"><b>实时行情</b></div><div className="eink-list">{[0, 1, 2].map((i) => <div key={i}><span>○ 暂无数据</span></div>)}</div><small className="eink-sub">{err}</small></div>;
   if (kind === "b" && rotate) return (
     <div className="kline-full" onClick={() => { setAutoPlay(false); setKlineIdx((i) => (i + 1) % watch.length); }} title="点击切换下一只自选股">
-      {cur ? <img className="kline-full-img" src={`/api/finance/kline/image?code=${encodeURIComponent(cur.code)}&days=60&w=800&h=600&colors=4&t=${klineIdx}`} alt={`${cur.name || cur.code} 日 K`} /> : null}
+      {cur ? <img className="kline-full-img" src={`${BASE_PATH}/api/finance/kline/image?code=${encodeURIComponent(cur.code)}&days=60&w=800&h=600&colors=4&t=${klineIdx}`} alt={`${cur.name || cur.code} 日 K`} /> : null}
       <div className="kline-full-bar" onClick={(e) => { e.stopPropagation(); setAutoPlay((v) => !v); }}>
         <span>{cur ? `${cur.name || cur.code} · 第 ${klineIdx + 1}/${watch.length} 只` : "加载中…"}</span>
         <button aria-label="轮播开关">{autoPlay ? "轮播中 · 点击暂停" : "已暂停 · 点击轮播"}</button>

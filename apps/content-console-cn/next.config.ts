@@ -20,14 +20,18 @@ if (!backend) {
 }
 
 // 路由前缀由 .env 的 NEXT_PUBLIC_BASE_PATH 决定，同一份代码可挂在两种位置：
-//   ""        → 独立二级域名根路径（https://dualcon.xiaowuai.vip/）
-//   "/admin"  → 门户反代子路径（https://dual.xiaowuai.vip/admin，默认值）
+//   ""        → 独立二级域名根路径（https://dualcn.xiaowuai.vip/，默认值）
+//   "/admin"  → 门户反代子路径（https://dual.xiaowuai.vip/admin，需显式配置）
 // basePath 会统一作用于路由、/_next 静态资源、<Link>；但 <img src> 这类原生标签
 // 不会被自动加前缀，页面内走 lib/api 的 BASE_PATH 手动拼接。
-const basePath = (process.env.NEXT_PUBLIC_BASE_PATH ?? "/admin").trim().replace(/\/$/, "");
+// 默认根路径部署：内容后台是独立域名，接口就是 /api/*，不再带 /admin 前缀。
+const basePath = (process.env.NEXT_PUBLIC_BASE_PATH ?? "").trim().replace(/\/$/, "");
 
 const nextConfig: NextConfig = {
   basePath,
+  // 构建产物目录。默认 .next；本地已有 dev/start 实例占用 .next（Windows 会锁文件、
+  // 构建无法清理）时，可 NEXT_DIST_DIR=.next-verify 另建一份做并行校验。
+  distDir: process.env.NEXT_DIST_DIR || ".next",
   // Next.js 15+ 默认拦截"跨域"dev 资源（含 HMR WebSocket）。用 127.0.0.1 访问时
   // 会被判定为跨域，导致 /_next/hmr 握手被拒、页面 hydration 永远挂起（一直转圈）。
   // 允许的 dev 来源（仅开发期跨域/HMR 校验用），可用 .env 的 ALLOWED_DEV_ORIGINS 覆盖（逗号分隔）。
