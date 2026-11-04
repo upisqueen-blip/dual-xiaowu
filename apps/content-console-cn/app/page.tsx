@@ -3285,6 +3285,14 @@ function ReadingPreview({ items }: { items: ReadingItem[] }) {
   );
 }
 
+// 后端上传接口返回的是后端侧相对路径（/uploads/<24hex>.png）。next.config 已把
+// /uploads/* 反代到后端；但 <img> 是原生标签，basePath（子路径部署时）不会自动
+// 加前缀，根路径部署（默认）时前缀为空，行为不变。
+function mediaSrc(url?: string): string {
+  if (!url) return "";
+  return url.startsWith("http") || url.startsWith("data:") ? url : `${BASE_PATH}${url}`;
+}
+
 function AlbumEditor({ value, onChange, notify }: { value: AlbumState; onChange: (a: AlbumState) => void; notify: (m: string) => void }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
@@ -3326,7 +3334,7 @@ function AlbumEditor({ value, onChange, notify }: { value: AlbumState; onChange:
         <div className="album-grid">
           {value.photos.map((p) => (
             <div key={p.id} className="album-item">
-              <img src={p.url} alt={p.caption || "相册照片"} />
+              <img src={mediaSrc(p.url)} alt={p.caption || "相册照片"} />
               <input className="cs-input" placeholder="说明文字（可选）" value={p.caption} onChange={(e) => setCaption(p.id, e.target.value)} />
               <button className="button soft danger" onClick={() => remove(p.id)}><Trash2 size={14} />删除</button>
             </div>
@@ -3345,7 +3353,7 @@ function AlbumPreview({ album }: { album: AlbumState }) {
       <div className="eink-title"><b>相册</b><span>共 {photos.length} 张</span></div>
       {!first ? <div className="eink-empty">暂无照片</div> : (
         <div className="album-prev">
-          <img src={first.url} alt={first.caption || "相册照片"} />
+          <img src={mediaSrc(first.url)} alt={first.caption || "相册照片"} />
         </div>
       )}
     </div>

@@ -46,7 +46,14 @@ const nextConfig: NextConfig = {
   },
   async rewrites() {
     if (!backend) return [];
-    return [{ source: "/api/:path*", destination: `${backend}/api/:path*` }];
+    return [
+      { source: "/api/:path*", destination: `${backend}/api/:path*` },
+      // 相册等上传文件由后端 StaticFiles 挂在根路径 /uploads 下（console_api
+      // 的 /api/uploads 返回的 url 就是 /uploads/<24hex>.png）。后台预览用
+      // <img src="/uploads/..."> 直接取图，如果不反代，这个请求会落到 Next
+      // 自己身上 → 404（浏览器控制台那条 "b476a9f….png 404" 就是它）。
+      { source: "/uploads/:path*", destination: `${backend}/uploads/:path*` },
+    ];
   },
   // basePath 非空时，直接访问本实例根路径 / 会 404（Next 不会自动补前缀）。
   // 这里加一条「不受 basePath 影响」的跳转：/ -> /admin，
