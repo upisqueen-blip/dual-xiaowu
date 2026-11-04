@@ -19,6 +19,12 @@ textarea.cs-input{height:auto;min-height:88px;padding:9px 10px;line-height:1.5;r
 .ss-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-top:10px}
 .ss-row label{display:flex;flex-direction:column;gap:6px;font-size:12px;color:var(--muted);font-weight:700}
 .ss-row .cs-input{width:100%}
+.ss-note{margin:10px 0 0;font-size:12px;line-height:1.6;color:var(--muted)}
+.ss-live{display:flex;gap:14px;align-items:flex-start;margin-top:12px;padding-top:12px;border-top:1px dashed var(--line)}
+.ss-live img{width:248px;max-width:46%;border:1px solid var(--line);border-radius:8px;background:#fff;image-rendering:pixelated}
+.ss-live div{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--muted)}
+.ss-live b{font-size:13px;color:var(--ink)}
+.ss-live a{color:var(--green);font-weight:700;text-decoration:none}
 .card-pad{background:var(--card);border:1px solid var(--line);border-radius:17px;padding:20px;margin-bottom:16px}
 .ct-controls{display:flex;flex-wrap:wrap;gap:14px;align-items:center;justify-content:space-between;margin-bottom:16px}
 .ct-toggle{display:inline-flex;align-items:center;gap:10px;cursor:pointer;font-weight:600;font-size:13px}

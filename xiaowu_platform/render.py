@@ -26,7 +26,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 from . import data_api
 from .settings import settings
 from .store import Store
@@ -152,6 +152,50 @@ def _palette_p_image(w: int, h: int, colors: int = 4) -> Image.Image:
             palette += [255, 255, 255]
     img.putpalette(palette)
     return img
+
+
+# 面板支持的色数：2=黑白，3=黑白红（BWR），4=黑白红黄（BWRY/E4）
+_PANEL_COLORS = (2, 3, 4)
+
+
+def screen_colors_from_config(dual_config: Optional[dict]) -> Optional[int]:
+    """读取内容后台「B 屏色彩」选择。
+
+    后台下发的 dual-config 把屏幕规格放在顶层 `screen`（另兼容小程序/第三方
+    可能使用的 screenB / screen_b）。只接受 2/3/4，其它值视为未设置。
+    """
+    if not isinstance(dual_config, dict):
+        return None
+    for key in ("screen", "screenB", "screen_b", "screen_b_config"):
+        node = dual_config.get(key)
+        if not isinstance(node, dict):
+            continue
+        value = node.get("colors")
+        if isinstance(value, bool):  # bool 是 int 子类，必须排除
+            continue
+        if isinstance(value, int) and value in _PANEL_COLORS:
+            return value
+    return None
+
+
+def resolve_dual_colors(dual_config: Optional[dict],
+                        requested: Optional[int] = None,
+                        default: int = 4) -> tuple[int, str]:
+    """决定 B 屏按几色渲染，返回 (色数, 来源)。
+
+    优先级：后台选择 > 设备请求 > 默认四色。
+
+    后台选择必须压过固件编译期值 `FPC2_COLOR_COUNT`：同一个后台要同时服务
+    三色板和四色板，运营在「屏幕规格」里选了三色就该出三色版式（红为唯一
+    强调色、无黄色像素），选了四色才用黄色做强调。反过来若让固件请求当上限，
+    三色板固件会让后台选的四色永远是死设置。
+    """
+    picked = screen_colors_from_config(dual_config)
+    if picked is not None:
+        return picked, "console"
+    if isinstance(requested, int) and not isinstance(requested, bool) and requested in _PANEL_COLORS:
+        return requested, "device"
+    return default, "default"
 
 
 def _new_canvas(w: int, h: int, colors: int = 2) -> Image.Image:
@@ -314,6 +358,114 @@ def _quantize_color(src: Image.Image, colors: int) -> Image.Image:
     return src.convert("RGB").quantize(palette=pal_img, dither=Image.FLOYDSTEINBERG)
 
 
+# 4x4 Bayer 有序抖动阈值（0..15 的经典矩阵，换算成 8..248 的 L 值）。
+# 三色屏只用有序抖动：Floyd-Steinberg 的随机误差扩散在只有三档颜色的面板上
+# 会撒出满屏孤立色点，屏幕看过去像一层脏噪点；Bayer 是规则网点，远看是干净
+# 的灰度层次，这也是所有三色墨水屏相框的通行做法。
+_BAYER4 = (
+    (0, 8, 2, 10),
+    (12, 4, 14, 6),
+    (3, 11, 1, 9),
+    (15, 7, 13, 5),
+)
+_BAYER4_LEVELS = [int((v + 0.5) * 255.0 / 16.0) for row in _BAYER4 for v in row]
+
+
+def _ordered_threshold_bytes(w: int, h: int) -> bytes:
+    """铺一张 w×h 的 Bayer 阈值底图（L 模式原始字节），比逐像素 Python 循环快。"""
+    row_cache: dict[int, bytes] = {}
+    rows = []
+    for y in range(h):
+        off = (y % 4) * 4
+        line = row_cache.get(off)
+        if line is None:
+            line = bytes(
+                _BAYER4_LEVELS[off + (x % 4)] for x in range(w)
+            )
+            row_cache[off] = line
+        rows.append(line)
+    return b"".join(rows)
+
+
+def _eink_tone(lum: Image.Image) -> Image.Image:
+    """墨水屏照片调色：按 2%/98% 分位拉伸对比度 + 轻微提亮（gamma 0.85）。
+
+    白底墨水屏的反射率远低于显示器，直接拿原始亮度做抖动，照片会整片发灰、
+    层次糊成一块；先拉伸到画面真正用到的亮度区间再提亮，出来的网点干净很多。
+    """
+    hist = lum.histogram()
+    total = sum(hist) or 1
+    lo, hi = 0, 255
+    acc = 0
+    for v, n in enumerate(hist):
+        acc += n
+        if acc >= total * 0.02:
+            lo = v
+            break
+    acc = 0
+    for v, n in enumerate(hist):
+        acc += n
+        if acc >= total * 0.98:
+            hi = v
+            break
+    if hi - lo < 32:  # 近乎单色画面不要拉伸，否则噪点被放大
+        lo, hi = 0, 255
+
+    span = max(1, hi - lo)
+    table = []
+    for i in range(256):
+        t = (i - lo) / span
+        t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+        table.append(int(255 * (t ** 0.85)))
+    return lum.point(table)
+
+
+def _quantize_bwr(src: Image.Image, colors: int = 3) -> Image.Image:
+    """三色（黑/白/红）专用量化：黑白走有序抖动，红只留在真正红的地方。
+
+    三色屏只有三档颜色，红色是唯一的强调色，必须"贵"着用：
+      1. 红色只从**明显偏红**的像素里取（R 比 G/B 高出阈值），而不是让调色板
+         量化去决定——那样任何偏暖的中间调都会被判成红，整屏红噪点。
+      2. 红色区域先做中值滤波去孤立点，再膨胀，避免细碎红斑。
+      3. 其余区域按亮度做 Bayer 有序抖动，得到干净的黑白网点。
+      4. 红色占比超过 30% 时自动收紧阈值（红底照片如苹果、红墙），
+         保证红色始终是"重点"而不是"底色"。
+    """
+    rgb = src.convert("RGB")
+    w, h = rgb.size
+    r, g, b = rgb.split()
+
+    def _red_mask(rg_thr: int, r_min: int = 80) -> Image.Image:
+        # 红色判据：R 同时明显高于 G 和 B，且本身不太暗
+        d1 = ImageChops.subtract(r, g)
+        d2 = ImageChops.subtract(r, b)
+        m = ImageChops.darker(d1, d2).point(lambda v: 255 if v >= rg_thr else 0)
+        bright = r.point(lambda v: 255 if v >= r_min else 0)
+        m = ImageChops.multiply(m, bright)
+        # 去掉孤立像素（细碎红点），再闭运算填掉内部小孔
+        m = m.filter(ImageFilter.MedianFilter(3))
+        m = m.filter(ImageFilter.MaxFilter(3))
+        m = m.filter(ImageFilter.MedianFilter(3))
+        return m
+
+    red_mask = _red_mask(55)
+    total = max(1, w * h)
+    red_ratio = red_mask.histogram()[255] / total
+    if red_ratio > 0.30:
+        red_mask = _red_mask(80, r_min=100)
+
+    # 黑白网点
+    lum = _eink_tone(rgb.convert("L"))
+    thresh = Image.frombytes("L", (w, h), _ordered_threshold_bytes(w, h))
+    white_mask = ImageChops.subtract(lum, thresh).point(lambda v: 255 if v > 0 else 0)
+
+    img = _palette_p_image(w, h, colors)  # 全白打底（索引 1）
+    black_mask = ImageChops.subtract(ImageChops.invert(white_mask), red_mask)
+    img.paste(0, mask=black_mask)
+    img.paste(2, mask=red_mask)  # 3 色面板索引 2 = 红
+    return img
+
+
 def _render_album_empty(w: int, h: int, colors: int, msg: str) -> Image.Image:
     scale = w / 400.0
     if colors >= 3:
@@ -353,7 +505,9 @@ def render_album(mac: str, w: int, h: int, colors: int,
     canvas.paste(fitted, (0, 0))
 
     if colors >= 3:
-        img = _quantize_color(canvas, colors)
+        # 三色（BWR）与四色（BWRY）走不同量化：三色屏没有黄，且只有三档颜色，
+        # 用四色那套误差扩散会把整张照片撒成红噪点。
+        img = _quantize_color(canvas, colors) if colors >= 4 else _quantize_bwr(canvas, colors)
     else:
         img = canvas.convert("L").convert("1")  # PIL 默认 Floyd 抖动
 
@@ -629,7 +783,10 @@ def render_course(mac: str, w: int, h: int, colors: int,
     date_str = f"{today.month}月{today.day}日 {_WEEKDAY_CN[today_idx]}"
     title = class_name or school or "课程表"
 
-    draw.text((int(14 * scale), int(10 * scale)), title, fill=fg, font=font_title)
+    # 与看板/板块动向一致：三色用红、四色用黄做版头强调，切换色数一眼可辨。
+    if is_color:
+        draw.rectangle([int(10 * scale), int(12 * scale), int(13 * scale), int(34 * scale)], fill=2)
+    draw.text((int(18 * scale) if is_color else int(14 * scale), int(10 * scale)), title, fill=fg, font=font_title)
     draw.text((w - int(14 * scale) - _text_w(draw, date_str, font_meta), int(16 * scale)),
               date_str, fill=fg, font=font_meta)
     draw.line([(int(10 * scale), int(44 * scale)),
@@ -659,7 +816,7 @@ def render_course(mac: str, w: int, h: int, colors: int,
         hl = is_color and i == current_idx
         if hl:
             draw.rectangle([int(10 * scale), y, w - int(10 * scale), y + row_h - 2], fill=2)
-        col = 3 if (hl and colors >= 4) else (1 if hl else fg)
+        col = (1 if colors < 4 else fg) if hl else fg  # 三色红底白字；四色黄底黑字
         cy = y + max(2, (row_h - font_body.size) // 2)
         draw.text((int(14 * scale), cy), f"{r['idx'] + 1}", fill=col, font=font_period)
         draw.text((int(42 * scale), cy), r["time"], fill=col, font=font_meta)
@@ -686,10 +843,14 @@ def render_scene_modules(title: str, modules: list, w: int, h: int, colors: int,
     img = _palette_p_image(w, h, colors) if colors >= 3 else Image.new("1", (w, h), 1)
     draw = ImageDraw.Draw(img)
     fg = 0
+    # 强调色：三色（BWR）用红，四色（BWRY）用黄。两版版式一致、配色不同，
+    # 后台切换「B 屏色彩」时肉眼立刻能分辨。
+    accent = 2 if colors >= 3 else 0
     font_title = _load_cjk(max(16, int(22 * scale)))
     font_body = _load_cjk(max(13, int(16 * scale)))
     font_meta = _load_cjk(max(10, int(12 * scale)))
-    draw.text((int(14 * scale), int(10 * scale)), title[:24], fill=fg, font=font_title)
+    draw.rectangle([int(10 * scale), int(12 * scale), int(13 * scale), int(32 * scale)], fill=accent)
+    draw.text((int(18 * scale), int(10 * scale)), title[:24], fill=fg, font=font_title)
     draw.text((w - int(14 * scale) - _text_w(draw, datetime.now().strftime("%m月%d日"), font_meta), int(16 * scale)),
               datetime.now().strftime("%m月%d日"), fill=fg, font=font_meta)
     draw.line([(int(10 * scale), int(40 * scale)), (w - int(10 * scale), int(40 * scale))], fill=fg, width=max(1, int(2 * scale)))
@@ -765,6 +926,9 @@ def render_weather(weather: dict, w: int, h: int, colors: int) -> Image.Image:
     fg = 0          # 黑
     wht = 1         # 白
     acc = 2 if is_color else 0   # 三色第3色：colors>=4 黄，==3 红
+    # 强调色块里的文字：三色屏的强调色是红，红底必须配白字（黑字压在红上在墨水屏
+    # 上几乎看不清）；四色屏的强调色是黄，黄底配黑字。
+    acc_fg = wht if colors == 3 else fg
     pad = int(14 * s)
 
     f_city = _load_cjk(max(20, int(26 * s)))
@@ -803,12 +967,14 @@ def render_weather(weather: dict, w: int, h: int, colors: int) -> Image.Image:
     # ---- 顶部：城市 + 「天气」+ 节气黄标 ----
     draw.text((pad, int(8 * s)), city, fill=fg, font=f_city)
     if pinyin:
-        draw.text((pad, int(8 * s) + f_city.size), pinyin, fill=fg, font=f_pin)
+        # 拼音排在城市名右侧同一行：原先压在下方会顶到分隔线，远看像被划了道删除线。
+        draw.text((pad + _text_w(draw, city, f_city) + int(8 * s), int(16 * s)),
+                  pinyin.upper(), fill=fg, font=f_pin)
     st_w = _text_w(draw, solar, f_meta) + int(16 * s)
     st_x = w - pad - st_w
     draw.text((st_x - _text_w(draw, "天气", f_desc) - int(8 * s), int(10 * s)), "天气", fill=fg, font=f_desc)
     draw.rectangle([st_x, int(10 * s), st_x + st_w, int(10 * s) + int(20 * s)], fill=acc)
-    draw.text((st_x + int(8 * s), int(13 * s)), solar, fill=fg, font=f_meta)
+    draw.text((st_x + int(8 * s), int(13 * s)), solar, fill=acc_fg, font=f_meta)
     draw.line([(pad, int(46 * s)), (w - pad, int(46 * s))], fill=fg, width=max(1, int(2 * s)))
 
     # ---- 中部：左温区 / 右日期（竖线分隔）----
@@ -819,7 +985,10 @@ def render_weather(weather: dict, w: int, h: int, colors: int) -> Image.Image:
     # 左：大温度 + 描述 + 体感/湿度/风力 + 雨云图标
     draw.text((pad, y_top), cur, fill=fg, font=f_temp)
     tw = _text_w(draw, cur, f_temp)
-    draw.text((pad + tw + int(14 * s), y_top + int(8 * s)), desc, fill=fg, font=f_desc)
+    # 四色屏：黄色留给节气/日期标，恶劣天气（雨/雪/雾/霾/大风）用红色点名，
+    # 三色屏红色是唯一强调色，天气描述保持黑色把红留给温度与节气标。
+    desc_color = 3 if (colors >= 4 and any(k in desc for k in ("雨", "雪", "雾", "霾", "风", "寒", "高温"))) else fg
+    draw.text((pad + tw + int(14 * s), y_top + int(8 * s)), desc, fill=desc_color, font=f_desc)
     _draw_weather_icon(draw, _weather_kind(desc, weather.get("today_code")),
                        vx - int(54 * s), y_top, int(50 * s), fg)
     meta_left = []
@@ -846,7 +1015,7 @@ def render_weather(weather: dict, w: int, h: int, colors: int) -> Image.Image:
     sy = yy + int(34 * s)
     sl_w = _text_w(draw, solar, f_sm) + int(14 * s)
     draw.rectangle([rx, sy, rx + sl_w, sy + int(16 * s)], fill=acc)
-    draw.text((rx + int(7 * s), sy + int(1 * s)), solar, fill=fg, font=f_sm)
+    draw.text((rx + int(7 * s), sy + int(1 * s)), solar, fill=acc_fg, font=f_sm)
     by = sy + int(24 * s)
     plate_txt = f"限行 {plate}"
     pb_w = _text_w(draw, plate_txt, f_sm) + int(14 * s)
@@ -857,7 +1026,7 @@ def render_weather(weather: dict, w: int, h: int, colors: int) -> Image.Image:
     y_fc = int(196 * s)
     draw.text((pad, y_fc), "三日天气 · 最高/最低/℃", fill=fg, font=f_meta)
     y_cells = y_fc + int(16 * s)
-    cell_h = int(44 * s)
+    cell_h = int(48 * s)  # 三行文字（11px 字号）在 44 高度里会压到下边框，右下角被切字
     inner_w = w - 2 * pad
     n = 3
     gap = int(6 * s)
@@ -880,7 +1049,7 @@ def render_weather(weather: dict, w: int, h: int, colors: int) -> Image.Image:
                            cx + cw - icon_size - int(4 * s), y_cells + int(4 * s), icon_size, fg)
 
     # ---- 底部：温馨提示 + 日出日落 ----
-    y_bot = y_cells + cell_h + int(8 * s)
+    y_bot = y_cells + cell_h + int(4 * s)
     tip_core = advice if advice else "今日天气平和"
     tb_w = _text_w(draw, "温馨提示", f_sm) + int(12 * s)
     draw.rectangle([pad, y_bot, pad + tb_w, y_bot + int(18 * s)], fill=fg)

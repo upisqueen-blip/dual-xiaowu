@@ -28,6 +28,7 @@ from .render import (
     render_error,
     render_unbound,
     render_unregistered,
+    resolve_dual_colors,
 )
 from .settings import settings
 from .store import Store
@@ -109,32 +110,32 @@ def render(
         pass
 
     owner = store.get_device_owner(mac)
+    # 配置先读出来：引导图也要跟着后台选的 B 屏色数走（三色板不该出现黄色）。
+    cfg_row = store.get_content_config(mac)
+    dual_cfg = cfg_row["config"] if cfg_row else None
+    eff_colors = colors
+    colors_source = "device"
+    if is_color:
+        eff_colors, colors_source = resolve_dual_colors(dual_cfg, colors)
     # 4) 未绑定 → 带配对码引导图
     if owner is None:
         pair_code = store.ensure_claim_code(mac)
         guide = render_unbound(mac, w, h, pair_code,
-                               colors if is_color else 2)
+                               eff_colors if is_color else 2)
         # X-Pair-Code 供固件打日志 / 排障用（屏幕上是图，日志里要能读到码）
-        headers = {"X-Device-Unbound": "1", "X-Pair-Code": pair_code}
+        headers = {"X-Device-Unbound": "1", "X-Pair-Code": pair_code,
+                   "X-Panel-Colors": str(eff_colors if is_color else 2),
+                   "X-Colors-Source": colors_source if is_color else "mono"}
         if is_color:
-            return Response(content=_pack_raw(guide, colors, bpp), media_type="application/octet-stream", headers=headers)
+            return Response(content=_pack_raw(guide, eff_colors, bpp), media_type="application/octet-stream", headers=headers)
         return Response(content=image_to_bmp_bytes(guide), media_type="image/bmp", headers=headers)
 
     # 5) 已绑定 → 渲染双屏内容
-    cfg_row = store.get_content_config(mac)
-    dual_cfg = cfg_row["config"] if cfg_row else None
     # 未读留言数：设备画面据此叠加「留言 N」徽标，播放后自动消失
     try:
         unread_messages = store.count_unread_messages(mac)
     except Exception:  # noqa: BLE001
         unread_messages = 0
-
-    eff_colors = colors
-    if is_color:
-        screen_cfg = (dual_cfg or {}).get("screen") or {}
-        cfg_colors = screen_cfg.get("colors")
-        if isinstance(cfg_colors, int) and cfg_colors in (2, 3, 4):
-            eff_colors = min(cfg_colors, colors)
 
     try:
         if screen == "A":
@@ -161,6 +162,8 @@ def render(
         "X-Render-Time-Ms": str(elapsed_ms),
         "X-Mode-Id": str(persona or ""),
         "X-Refresh-Minutes": "5" if screen == "A" else "30",
+        "X-Panel-Colors": str(2 if screen == "A" else eff_colors),
+        "X-Colors-Source": "mono" if screen == "A" else colors_source,
     }
     if store.consume_pending_refresh(mac):
         headers["X-Pending-Refresh"] = "1"
@@ -179,6 +182,7 @@ def preview(
     aMode: Optional[str] = Query(default=None),
     bMode: Optional[str] = Query(default=None),
     appId: Optional[str] = Query(default=None),
+    forceColors: Optional[int] = Query(default=None, ge=2, le=4),
     x_device_token: Optional[str] = Header(default=None),
 ):
     """浏览器快照预览：返回 PNG，便于在内容后台/小程序直接核对设备将显示的内容。
@@ -227,7 +231,8 @@ def preview(
         except Exception:  # noqa: BLE001
             img = render_error("DEMO", w, h)
         return Response(content=image_to_png_bytes(img), media_type="image/png",
-                        headers={"X-Preview-App": appId, "X-Cache-Hit": "0"})
+                        headers={"X-Preview-App": appId, "X-Cache-Hit": "0",
+                                 "X-Panel-Colors": str(colors if screen == "B" else 2)})
 
     # 即时预览覆盖：按所选模式直接出图（不依赖已保存的设备配置）
     if aMode or bMode or sceneKey:
@@ -251,7 +256,8 @@ def preview(
         except Exception:  # noqa: BLE001
             img = render_error("DEMO", w, h)
         return Response(content=image_to_png_bytes(img), media_type="image/png",
-                        headers={"X-Mode-Id": str(persona or ""), "X-Cache-Hit": "0", "X-Preview-Override": "1"})
+                        headers={"X-Mode-Id": str(persona or ""), "X-Cache-Hit": "0", "X-Preview-Override": "1",
+                                 "X-Panel-Colors": str(colors if screen == "B" else 2)})
     if mac:
         mac = mac.strip().upper()
         dual_cfg = None
@@ -264,19 +270,22 @@ def preview(
         except Exception:  # noqa: BLE001
             unread_messages = 0
         # 未绑定也允许预览（展示空态/相册兜底），无需设备令牌
-        eff_colors = colors
+        # 色数与设备取图同源：后台选了三色就预览三色，选了四色就预览四色。
+        # forceColors 供后台「切色数即时看效果」用：在配置尚未下发时也能按新色数出图。
+        eff_colors, colors_source = resolve_dual_colors(dual_cfg, colors)
+        if forceColors is not None:
+            eff_colors, colors_source = forceColors, "preview"
         if screen == "B":
-            screen_cfg = (dual_cfg or {}).get("screen") or {}
-            cfg_colors = screen_cfg.get("colors")
-            if isinstance(cfg_colors, int) and cfg_colors in (2, 3, 4):
-                eff_colors = min(cfg_colors, colors)
             img = render_dual_screen(mac, "B", w, h, eff_colors, dual_cfg,
                                      unread_messages=unread_messages)
         else:
+            eff_colors, colors_source = 2, "mono"
             img = render_dual_screen(mac, "A", w, h, 2, dual_cfg,
                                      unread_messages=unread_messages)
         return Response(content=image_to_png_bytes(img), media_type="image/png",
-                        headers={"X-Mode-Id": str(persona or ""), "X-Cache-Hit": "0"})
+                        headers={"X-Mode-Id": str(persona or ""), "X-Cache-Hit": "0",
+                                 "X-Panel-Colors": str(eff_colors),
+                                 "X-Colors-Source": colors_source})
     # 无 mac：渲染一张演示图（默认学习场景）
     demo_cfg = _demo_config()
     if screen == "B":
@@ -284,7 +293,8 @@ def preview(
     else:
         img = render_dual_screen("DEMO", "A", w, h, 2, demo_cfg)
     return Response(content=image_to_png_bytes(img), media_type="image/png",
-                    headers={"X-Mode-Id": str(persona or ""), "X-Cache-Hit": "0"})
+                    headers={"X-Mode-Id": str(persona or ""), "X-Cache-Hit": "0",
+                             "X-Panel-Colors": str(colors if screen == "B" else 2)})
 
 
 def _demo_config() -> dict:

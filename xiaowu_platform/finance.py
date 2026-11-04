@@ -360,7 +360,12 @@ def render_kline_image(kline: dict[str, Any], w: int, h: int, colors: int) -> Im
     # 标题：名称 + 最新价 + 最新涨跌幅
     last, prev = items[-1], items[-2]
     pct = (last["close"] - prev["close"]) / prev["close"] * 100 if prev["close"] else 0.0
-    draw.text((pad, int(8 * s)), f"{name}  {last['close']:.2f}  {_pct_text(pct)}", fill=0, font=f_title)
+    draw.text((pad, int(8 * s)), f"{name}  {last['close']:.2f}", fill=0, font=f_title)
+    # 涨跌幅单独上色：三色屏红涨、黑跌（A 股习惯）；黑白屏保持黑字
+    _head = f"{name}  {last['close']:.2f}"
+    _hx = pad + int(draw.textlength(_head, font=f_title)) + int(9 * s)
+    draw.text((_hx, int(8 * s)), _pct_text(pct),
+              fill=(3 if (colored and pct >= 0) else 0), font=f_title)
     days_label = f"日K · {items[0]['date'][5:]} ~ {last['date'][5:]}"
     dw = draw.textlength(days_label, font=f_meta)
     draw.text((w - pad - dw, int(12 * s)), days_label, fill=0, font=f_meta)
@@ -1068,7 +1073,11 @@ def render_market_board(groups: list, w: int, h: int, title: str = "大盘全景
 
 # ── B 屏：板块动向 + 贵金属/石油（BWRY 四色，红涨黑跌） ─────────
 def render_sectors(sectors: dict, commodities: list, w: int, h: int, colors: int) -> Image.Image:
-    """B 屏（BWRY 四色）：板块动向（行业/概念涨幅条 红涨黑跌）+ 贵金属/石油小卡。"""
+    """B 屏板块动向（红涨黑跌）+ 贵金属/石油小卡。
+
+    三色面板（BWR）用红色做唯一强调色；四色面板（BWRY）改用黄色做版式强调，
+    红色只留给涨幅。这样同一套模板在两种面板上都能出图，且一眼能分出是哪版。
+    """
     is_color = colors >= 3
     img = _palette(w, h, colors) if is_color else Image.new("1", (w, h), 1)
     draw = ImageDraw.Draw(img)
@@ -1080,23 +1089,29 @@ def render_sectors(sectors: dict, commodities: list, w: int, h: int, colors: int
     f_bar = _cjk(max(9, int(11 * s)))
     fg = 0
     red = 3 if is_color else 0
+    accent = 2 if is_color else 0  # 三色=红，四色=黄
 
     today = datetime.now().strftime("%m-%d %H:%M")
-    draw.text((pad, int(8 * s)), "板块动向", fill=fg, font=f_title)
+    draw.rectangle([pad, int(10 * s), pad + int(3 * s), int(31 * s)], fill=accent)
+    draw.text((pad + int(8 * s), int(8 * s)), "板块动向", fill=fg, font=f_title)
     tw = draw.textlength(today, font=f_meta)
     draw.text((w - pad - tw, int(12 * s)), today, fill=fg, font=f_meta)
     draw.line([(pad, int(34 * s)), (w - pad, int(34 * s))], fill=fg, width=max(1, int(s)))
 
+    def _section_label(text: str, y: int) -> None:
+        draw.rectangle([pad, y + int(3 * s), pad + int(3 * s), y + int(11 * s)], fill=accent)
+        draw.text((pad + int(7 * s), y), text, fill=fg, font=f_sec)
+
     y = int(42 * s)
-    draw.text((pad, y), "行业板块", fill=fg, font=f_sec)
+    _section_label("行业板块", y)
     y += int(18 * s)
     y = _draw_sector_rows(draw, (sectors.get("industry") or [])[:4], pad, y, w, s, f_bar, red, fg)
     y += int(3 * s)
-    draw.text((pad, y), "更多行业", fill=fg, font=f_sec)
+    _section_label("更多行业", y)
     y += int(18 * s)
     y = _draw_sector_rows(draw, (sectors.get("concept") or [])[:3], pad, y, w, s, f_bar, red, fg)
     y += int(3 * s)
-    draw.text((pad, y), "贵金属 · 石油", fill=fg, font=f_sec)
+    _section_label("贵金属 · 石油", y)
     y += int(16 * s)
     _draw_commodity_strip(draw, commodities, pad, y, w, s, f_bar, red, fg)
     foot = "板块/商品 · 多源聚合（原型）"

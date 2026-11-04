@@ -174,6 +174,25 @@ export default function DualConsole() {
     } finally { setLoading(false); }
   }
 
+  // 选中设备后回填服务器上已保存的「B 屏色彩」：同一账号换浏览器/换电脑时，
+  // 后台仍应按用户上次选的色数渲染（默认四色会让三色板出四色版式）。
+  useEffect(() => {
+    const mac = selectedDevice?.mac;
+    if (!mac || !getToken()) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const r = await api<{ config?: { screen?: { size?: string; colors?: number } } | null }>(`/api/device/${encodeURIComponent(mac)}/dual-config`);
+        const saved = r?.config?.screen;
+        if (cancelled || !saved) return;
+        const size: "4.2" | "5.83" = saved.size === "5.83" ? "5.83" : "4.2";
+        const colors: 2 | 3 | 4 = saved.colors === 2 ? 2 : saved.colors === 3 ? 3 : 4;
+        setScreen({ size, colors });
+      } catch { /* 离线或未登录时继续用本地草稿 */ }
+    })();
+    return () => { cancelled = true; };
+  }, [selectedDevice?.mac]);
+
   async function loadDevices() {
     try {
       const result = await api<{ devices?: Device[] }>("/api/user/devices");
@@ -256,7 +275,8 @@ export default function DualConsole() {
     setSavedAt(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }));
     try {
       await api(`/api/device/${encodeURIComponent(selectedDevice.mac)}/dual-config`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-      notify(`已保存双屏配置到服务器，设备下次唤醒将自动拉取渲染（${selectedDevice.nickname || selectedDevice.mac}）`);
+      const colorLabel = screen.colors === 2 ? "黑白" : screen.colors === 3 ? "三色（黑白红）" : "四色（黑白红黄）";
+      notify(`已保存并下发：B 屏按${colorLabel}渲染（${selectedDevice.nickname || selectedDevice.mac}）`);
     } catch (error) {
       const msg = error instanceof Error && error.message ? error.message : "网络错误";
       notify(`下发失败：${msg}（本地模式已保存）`);
@@ -1005,7 +1025,7 @@ function ScreenEditor({ scene, sceneKey, value, update, save, savedAt, content, 
   const { weatherPreview, weatherLoading, weatherError } = useDualWeatherPreview(sceneKey === "family" && value.a.mode === "family-weather", deviceMac, content.weatherCity);
   return <>
     <div className="page-intro row"><div><span className="kicker">{scene.name.toUpperCase()} SCENE</span><h2>{scene.name}场景 · 双屏配置</h2><p>A 屏负责快速文字信息，B 屏负责彩色结构与图像。</p></div><div className="save-state"><ShieldCheck size={17}/>{savedAt ? `模式保存于 ${savedAt}` : "配置尚未保存"}</div></div>
-    <ScreenSettings value={screen} onChange={setScreen} />
+    <ScreenSettings value={screen} onChange={setScreen} sceneKey={sceneKey} bMode={value.b.mode || defaultMode(sceneKey, "b")} deviceMac={deviceMac} />
     <div className="editor-grid">
       <ScreenForm kind="a" sceneKey={sceneKey} value={value.a} onChange={(p) => update("a", p)}/>
       <ScreenPreview kind="a" sceneKey={sceneKey} scene={scene.name} config={value.a} content={content} screen={screen} weatherPreview={weatherPreview} weatherLoading={weatherLoading} weatherError={weatherError}/>
@@ -1017,19 +1037,39 @@ function ScreenEditor({ scene, sceneKey, value, update, save, savedAt, content, 
   </>;
 }
 
-function ScreenSettings({ value, onChange }: { value: { size: "4.2" | "5.83"; colors: 2 | 3 | 4 }; onChange: (s: { size: "4.2" | "5.83"; colors: 2 | 3 | 4 }) => void }) {
+function ScreenSettings({ value, onChange, sceneKey, bMode, deviceMac }: { value: { size: "4.2" | "5.83"; colors: 2 | 3 | 4 }; onChange: (s: { size: "4.2" | "5.83"; colors: 2 | 3 | 4 }) => void; sceneKey: SceneKey; bMode: string; deviceMac: string }) {
+  const colorNote = value.colors === 2
+    ? "黑白双色：无彩色强调，全部信息用黑/白网点表达。"
+    : value.colors === 3
+      ? "三色版式：黑白红。红色是唯一强调色，不输出任何黄色像素。"
+      : "四色版式：黑白红黄。黄色用于标题条/节气/日期等版式强调，红色留给涨幅与警示。";
+  // 后端真实出图（与设备取图同一套渲染代码）：切换色数即可看到三色/四色两版差异。
+  // 已选设备时带上 mac 渲染已保存内容，并用 forceColors 让色数立即跟随下拉框；
+  // 未选设备时退回模板出图（sceneKey/bMode）。
+  const liveSrc = deviceMac
+    ? `${BASE_PATH}/api/preview?persona=DUAL_B&w=400&h=300&colors=${value.colors}&forceColors=${value.colors}&mac=${encodeURIComponent(deviceMac)}&v=${value.colors}`
+    : `${BASE_PATH}/api/preview?persona=DUAL_B&w=400&h=300&colors=${value.colors}&sceneKey=${encodeURIComponent(sceneKey)}&bMode=${encodeURIComponent(bMode)}&v=${value.colors}`;
   return <div className="card-pad screen-settings">
-    <div className="tt-grid-head"><span>屏幕规格</span><span className="tt-hint">需与设备实际面板一致（编译时由 menuconfig 确定）</span></div>
+    <div className="tt-grid-head"><span>屏幕规格</span><span className="tt-hint">决定 B 屏按几色渲染，需与设备实际面板一致（三色板选四色时，黄色会显示为白）</span></div>
     <div className="ss-row">
       <label>屏幕尺寸<select className="cs-input" value={value.size} onChange={(e) => onChange({ ...value, size: e.target.value as "4.2" | "5.83" })}>
         <option value="4.2">4.2 寸（400 × 300）</option>
         <option value="5.83">5.83 寸（648 × 480）</option>
       </select></label>
-      <label>B 屏色彩（FPC2）<select className="cs-input" value={String(value.colors)} onChange={(e) => onChange({ ...value, colors: parseInt(e.target.value, 10) as 2 | 3 | 4 })}>
+      <label>B 屏面板色彩（FPC2）<select className="cs-input" value={String(value.colors)} onChange={(e) => onChange({ ...value, colors: parseInt(e.target.value, 10) as 2 | 3 | 4 })}>
         <option value={2}>黑白（2 色）</option>
         <option value={3}>黑白红（3 色）</option>
         <option value={4}>黑白红黄（4 色）</option>
       </select></label>
+    </div>
+    <p className="ss-note">{colorNote}切换后点「应用到设备」生效（设备按此色数出图，不再依赖固件编译期配置）。</p>
+    <div className="ss-live">
+      <img src={liveSrc} alt="B 屏后端渲染效果" />
+      <div>
+        <b>B 屏 · 后端真实出图</b>
+        <span>{deviceMac ? `当前按 ${value.colors === 3 ? "三色" : value.colors === 4 ? "四色" : "黑白"}渲染（与应用后设备一致）` : "未选择设备，展示演示模板"}</span>
+        <a href={liveSrc} target="_blank" rel="noreferrer">新窗口打开</a>
+      </div>
     </div>
   </div>;
 }
