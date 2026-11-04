@@ -150,7 +150,9 @@ private:
     std::vector<BookPage> book_pages_;
     size_t book_page_ = 0;
     lv_obj_t* book_image_ = nullptr;
+    lv_obj_t* welcome_image_ = nullptr;
     std::unique_ptr<LvglImage> book_image_data_;
+    std::unique_ptr<LvglImage> welcome_image_data_;
     std::string loaded_book_image_;
     std::function<std::unique_ptr<LvglImage>(const std::string&)>
         book_image_loader_;
@@ -171,6 +173,7 @@ private:
     void EnsureUi();
     void Render();
     void EnsureBookImageLoaded(const std::string& name);
+    void EnsureWelcomeImageLoaded();
     std::string RenderHome() const;
     std::string RenderSpeaking() const;
     std::string RenderReading() const;

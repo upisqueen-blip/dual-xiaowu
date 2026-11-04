@@ -14,6 +14,7 @@
 #include <font_awesome.h>
 #include <cJSON.h>
 #include "settings.h"
+#include "welcome_png.h"
 
 LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
 LV_FONT_DECLARE(BUILTIN_ICON_FONT);
@@ -375,6 +376,12 @@ void EpaperDashboard::EnsureUi() {
     lv_obj_add_flag(book_image_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_set_style_bg_color(book_image_, lv_color_white(), 0);
     lv_obj_set_style_bg_opa(book_image_, LV_OPA_COVER, 0);
+
+    // 欢迎页全屏烘焙图（logo + 欢迎语 + 售后群），复用 PNG 解码通道。
+    welcome_image_ = lv_image_create(overlay_);
+    lv_obj_add_flag(welcome_image_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_style_bg_color(welcome_image_, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(welcome_image_, LV_OPA_COVER, 0);
 }
 
 void EpaperDashboard::Show(Page page) {
@@ -627,6 +634,17 @@ void EpaperDashboard::EnsureBookImageLoaded(const std::string& name) {
     book_image_data_.reset();
     loaded_book_image_ = name;
     if (book_image_loader_) book_image_data_ = book_image_loader_(name);
+}
+
+void EpaperDashboard::EnsureWelcomeImageLoaded() {
+    if (welcome_image_data_ != nullptr) return;
+    // 编译期烘焙的欢迎页 PNG（welcome_png.h），经 LVGL PNG 解码通道渲染。
+    try {
+        welcome_image_data_ = std::make_unique<LvglAllocatedImage>(
+            const_cast<uint8_t*>(welcome_png), welcome_png_len);
+    } catch (...) {
+        welcome_image_data_.reset();
+    }
 }
 
 void EpaperDashboard::BookNext() {
@@ -1204,6 +1222,8 @@ std::string EpaperDashboard::RenderSettings() const {
 void EpaperDashboard::Render() {
     std::string body;
     lv_label_set_text(title_, PageName(page_));
+    if (welcome_image_) lv_obj_add_flag(welcome_image_, LV_OBJ_FLAG_HIDDEN);
+    if (title_) lv_obj_remove_flag(title_, LV_OBJ_FLAG_HIDDEN);
     // 今日看板 + 陪练页：整幅画面/字幕需要全屏，LVGL footer 隐藏；
     // 陪练页还需要顶部状态栏（WiFi/USB）。
     // 今日看板还需要隐藏 title_（服务器渲染画面自带标题/时间/电量）。
@@ -1393,11 +1413,23 @@ void EpaperDashboard::Render() {
                       menu_names[selected_item_]);
         lv_label_set_text(footer_, footer);
     } else if (page_ == Page::kWelcome) {
-        // 欢迎页：显示引导文案，隐藏功能菜单，footer 提示如何进入菜单。
+        // 欢迎页：优先显示烘焙好的全屏欢迎图（logo + 欢迎语 + 售后群）；
+        // 仅在图像缺失时回退到纯文本引导文案。
         lv_obj_add_flag(menu_, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_remove_flag(body_, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_remove_flag(footer_, LV_OBJ_FLAG_HIDDEN);
-        lv_label_set_text(footer_, "按 OK 进入功能菜单");
+        EnsureWelcomeImageLoaded();
+        if (welcome_image_data_ != nullptr) {
+            const lv_img_dsc_t* dsc = welcome_image_data_->image_dsc();
+            lv_image_set_src(welcome_image_, dsc);
+            lv_obj_align(welcome_image_, LV_ALIGN_TOP_LEFT, 0, 0);
+            lv_obj_remove_flag(welcome_image_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(body_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(footer_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(title_, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_remove_flag(body_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_remove_flag(footer_, LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text(footer_, "按 OK 进入功能菜单");
+        }
     } else {
         lv_obj_add_flag(menu_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(body_, LV_OBJ_FLAG_HIDDEN);
