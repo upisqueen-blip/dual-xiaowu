@@ -729,13 +729,25 @@ class Store:
         return code
 
     def consume_pending_refresh(self, device_id: str) -> bool:
-        """若设备有待刷新标记则清除并返回 True（设备已拉取）。"""
+        """若设备有待刷新标记则清除并返回 True（设备已拉取）。
+
+        devices 行按注册时的原始 MAC 写法存储，设备取图时带的是小写 MAC，
+        控制台写标记时带的是大写 MAC，SQLite 的 TEXT 比较区分大小写 —— 只做
+        精确匹配会让「应用到设备」的立即刷新信号静默失效（设备只能等 5/30
+        分钟周期刷新，用户看到的就是「点了应用没反应」）。
+        """
         with self.connect() as db:
-            row = db.execute("SELECT pending_refresh FROM devices WHERE device_id=?", (device_id,)).fetchone()
-            was = bool(row and int(row["pending_refresh"]))
-            if was:
-                db.execute("UPDATE devices SET pending_refresh=0 WHERE device_id=?", (device_id,))
-        return was
+            for cand in _mac_candidates(device_id):
+                row = db.execute(
+                    "SELECT pending_refresh FROM devices WHERE device_id=?", (cand,)
+                ).fetchone()
+                if not row:
+                    continue
+                was = bool(int(row["pending_refresh"]))
+                if was:
+                    db.execute("UPDATE devices SET pending_refresh=0 WHERE device_id=?", (cand,))
+                return was
+        return False
 
     def save_content_config(self, device_id: str, payload: dict[str, Any]) -> str:
         ts = now_iso()
@@ -916,13 +928,25 @@ class Store:
 
     # ——— pending_refresh（A 屏立即同步信号）———
     def set_pending_refresh(self, device_id: str, value: bool) -> None:
+        # 同 report_storage：按 MAC 候选逐个匹配，避免大小写不同导致 0 行更新。
         with self.connect() as db:
-            db.execute("UPDATE devices SET pending_refresh=? WHERE device_id=?", (int(bool(value)), device_id))
+            for cand in _mac_candidates(device_id):
+                cursor = db.execute(
+                    "UPDATE devices SET pending_refresh=? WHERE device_id=?",
+                    (int(bool(value)), cand),
+                )
+                if cursor.rowcount:
+                    return
 
     def get_pending_refresh(self, device_id: str) -> int:
         with self.connect() as db:
-            row = db.execute("SELECT pending_refresh FROM devices WHERE device_id=?", (device_id,)).fetchone()
-        return int(row["pending_refresh"]) if row else 0
+            for cand in _mac_candidates(device_id):
+                row = db.execute(
+                    "SELECT pending_refresh FROM devices WHERE device_id=?", (cand,)
+                ).fetchone()
+                if row:
+                    return int(row["pending_refresh"])
+        return 0
 
     def template(self, template_id: str) -> dict[str, Any] | None:
         with self.connect() as db:
