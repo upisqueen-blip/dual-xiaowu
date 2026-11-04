@@ -1375,7 +1375,8 @@ function DeviceTfCard({ mac }: { mac: string }) {
             {storage.total_mb != null ? <span>总容量 {storage.total_mb} MB · 可用 {storage.free_mb ?? "?"} MB</span> : null}
             {storage.status ? <small>{storage.status}</small> : null}
           </div>
-          <div className="tf-grid">
+          {storage.mounted ? (
+            <div className="tf-grid">
             {meta.map((m) => {
               const files = cats[m.key] || [];
               return (
@@ -1386,7 +1387,10 @@ function DeviceTfCard({ mac }: { mac: string }) {
                 </div>
               );
             })}
-          </div>
+            </div>
+          ) : (
+            <p className="tt-empty">设备已上报：TF 卡未挂载。按上面的原因处理后重新插卡，再点「刷新」（设备下次联网会自动重新上报）。</p>
+          )}
         </>
       ) : null}
     </div>

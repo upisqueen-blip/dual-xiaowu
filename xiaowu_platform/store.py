@@ -33,6 +33,13 @@ def _mac_candidates(device_id: str | None) -> list[str]:
     for c in (s, colon, digits):
         if c and c not in cands:
             cands.append(c)
+    # SQLite 的 TEXT 比较区分大小写，而 devices 表的行是注册时原样写入的：
+    # 固件注册报小写 44:b1:76:a4:e3:80，控制台接口层统一 upper() 后再查，
+    # 只给大写候选会让 UPDATE/SELECT 命中 0 行（静默丢数据）。两种大小写都列上。
+    for c in list(cands):
+        low = c.lower()
+        if low not in cands:
+            cands.append(low)
     return cands
 
 
@@ -281,7 +288,8 @@ class Store:
         token = secrets.token_urlsafe(32)
         with self.connect() as db:
             db.execute(
-                "INSERT INTO devices VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 0)",
+                "INSERT INTO devices (device_id, model, firmware_version, token_hash, "
+                "capabilities, created_at) VALUES (?, ?, ?, ?, ?, ?)",
                 (device_id, model, firmware_version, self.hash_token(token), json.dumps(capabilities), now_iso()),
             )
             # 生成设备配对码（6 位大写字母数字），供用户在内容后台扫码/输入绑定
@@ -1319,19 +1327,39 @@ class Store:
             db.execute("DELETE FROM device_tokens WHERE device_id=?", (device_id,))
 
     def report_runtime(self, device_id: str, mode: str, awake: bool) -> None:
+        # devices.device_id 实际存的是注册时固件上报的原始写法（小写 + 冒号），
+        # 而控制台/接口层统一 upper()，所以这里必须按 MAC 候选逐个匹配，
+        # 否则 UPDATE 命中 0 行、静默丢数据。
         with self.connect() as db:
-            db.execute("UPDATE devices SET runtime_mode=?, last_seen_at=? WHERE device_id=?",
-                       (mode, now_iso(), device_id))
+            for cand in _mac_candidates(device_id):
+                cursor = db.execute(
+                    "UPDATE devices SET runtime_mode=?, last_seen_at=? WHERE device_id=?",
+                    (mode, now_iso(), cand),
+                )
+                if cursor.rowcount:
+                    return
 
     def report_storage(self, device_id: str, snapshot: dict[str, Any]) -> None:
         """设备上报 TF 卡存储快照（状态 + 各分类文件清单），供后台「TF 卡」面板读取。"""
+        payload = json.dumps(snapshot, ensure_ascii=False)
         with self.connect() as db:
-            db.execute("UPDATE devices SET storage_json=?, last_seen_at=? WHERE device_id=?",
-                       (json.dumps(snapshot, ensure_ascii=False), now_iso(), device_id))
+            for cand in _mac_candidates(device_id):
+                cursor = db.execute(
+                    "UPDATE devices SET storage_json=?, last_seen_at=? WHERE device_id=?",
+                    (payload, now_iso(), cand),
+                )
+                if cursor.rowcount:
+                    return
 
     def get_storage(self, device_id: str) -> dict[str, Any] | None:
         with self.connect() as db:
-            row = db.execute("SELECT storage_json FROM devices WHERE device_id=?", (device_id,)).fetchone()
+            row = None
+            for cand in _mac_candidates(device_id):
+                row = db.execute(
+                    "SELECT storage_json FROM devices WHERE device_id=?", (cand,)
+                ).fetchone()
+                if row:
+                    break
         if not row or not row["storage_json"]:
             return None
         try:
