@@ -1688,6 +1688,16 @@ private:
                     [this](const PropertyList& p) -> ReturnValue {
                         return storage_.List(p["category"].value<std::string>());
                     });
+        mcp.AddTool("self.storage.rescan",
+                    "重新探测并挂载 TF 卡。卡座无插拔检测，带电插卡后用它可以免重启。",
+                    PropertyList(),
+                    [this](const PropertyList&) -> ReturnValue {
+                        // 卡座没有 CD 脚，开机只挂载一次；用户带着设备插卡后必须
+                        // 显式重探，否则界面会一直停在「未挂载」。
+                        if (storage_.mounted()) return storage_.Status();
+                        if (storage_.EnsureMounted()) return storage_.Status();
+                        return storage_.MountError();
+                    });
         mcp.AddTool("self.epaper.show_sd_image", "在 FPC2 FPC2 彩色屏显示 TF 卡 /xiaowu/images 中的 JPG/JPEG 图片。",
                     PropertyList({Property("name", kPropertyTypeString)}),
                     [this](const PropertyList& p) -> ReturnValue {
@@ -1820,6 +1830,11 @@ public:
         // 正确做法：先显示欢迎页；已绑定且后台配了双屏内容的设备，
         // RefreshDualScreens 成功后会用 RawFrameRefresh 把 A 屏覆盖成网络图
         // （大盘全景等）；未配置/未配网的设备就停在欢迎页引导去后台配置。
+        // 诊断期开关（config.h EPD_BOOT_SELFTEST）：开机先刷三张纯色图，
+        // 用肉眼判定面板到底会不会出墨，再决定下一步查软件还是查硬件。
+        if (EPD_BOOT_SELFTEST) {
+            display_->RunPatternSelfTest();
+        }
         display_->ShowBootHome();
         ESP_LOGI(kTag, "A 屏首屏显示欢迎页（已配置双屏内容时将被网络图覆盖）");
         display_->dashboard().SetInkSightShow(

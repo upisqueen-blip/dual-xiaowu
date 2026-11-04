@@ -42,28 +42,40 @@ struct SdProbe {
     int cmd0_resp = -1;   // 0x01=卡已进入 idle，0xFF=无应答
     int cmd0_tries = 0;
     int cmd8_resp = -1;   // 0x01 说明是 SD v2（SDHC/SDXC）
+    // MISO 在整段探测里是否出现过低电平。全程恒 1 说明 DAT0 这条线上根本没有
+    // 器件在驱动（卡没插到底 / 卡座该脚没接到 MCU / 卡没供电）；
+    // 出现过 0 却仍无 CMD0 应答，则是卡在通信但握手失败（时序/时钟太慢）。
+    bool miso_saw_zero = false;
+    int miso_low_bits = 0;
     bool alive() const { return cmd0_resp == 0x01; }
 };
 
-void SdDelayTicks() { esp_rom_delay_us(3); }  // ≈ 160 kHz，远低于 400 kHz 上限
+// ≈ 40 kHz。SD 卡上电初始化阶段只要求 ≤400 kHz，放慢能显著提高老旧卡、
+// 长走线、卡座接触电阻偏大时的握手成功率（快时钟下边沿抖动会被当成错帧）。
+void SdDelayTicks() { esp_rom_delay_us(8); }
 
-int SdTransfer(uint8_t out) {
+int SdTransfer(uint8_t out, SdProbe* probe = nullptr) {
     int in = 0;
     for (int i = 0; i < 8; ++i) {
         gpio_set_level(SD_MOSI_PIN, (out >> (7 - i)) & 0x01);
         SdDelayTicks();
         gpio_set_level(SD_SCK_PIN, 1);
         SdDelayTicks();
-        in = (in << 1) | gpio_get_level(SD_MISO_PIN);
+        const int bit = gpio_get_level(SD_MISO_PIN);
+        if (probe && bit == 0) {
+            probe->miso_saw_zero = true;
+            ++probe->miso_low_bits;
+        }
+        in = (in << 1) | bit;
         gpio_set_level(SD_SCK_PIN, 0);
         SdDelayTicks();
     }
     return in;
 }
 
-int SdReadResponse() {
+int SdReadResponse(SdProbe* probe = nullptr) {
     for (int i = 0; i < 8; ++i) {
-        const int value = SdTransfer(0xFF);
+        const int value = SdTransfer(0xFF, probe);
         if ((value & 0x80) == 0) return value;  // 首字节 bit7=0 才是响应
     }
     return 0xFF;
@@ -91,33 +103,36 @@ SdProbe BitBangProbe() {
     gpio_set_level(SD_CS_PIN, 1);
     gpio_set_level(SD_SCK_PIN, 0);
     gpio_set_level(SD_MOSI_PIN, 1);
-    esp_rom_delay_us(5000);  // 等卡上电稳定
+    // SD 规范要求 VDD 稳定后再等 1 ms 才能发命令；实测部分大容量卡（尤其
+    // 卡座上有 LC 滤波、上电斜率偏慢的板子）需要更久才肯应答。这里给足 100 ms。
+    esp_rom_delay_us(100000);
     result.cs_idle = gpio_get_level(SD_CS_PIN);
     result.dat0_idle = gpio_get_level(SD_MISO_PIN);
 
-    // CS 拉高状态下打 80 个时钟，让卡完成上电同步。
-    for (int i = 0; i < 10; ++i) SdTransfer(0xFF);
+    // CS 拉高状态下打 160 个时钟，让卡完成上电同步（规范要求 ≥74 个）。
+    for (int i = 0; i < 20; ++i) SdTransfer(0xFF, &result);
 
     const uint8_t cmd0[6] = {0x40, 0x00, 0x00, 0x00, 0x00, 0x95};
-    for (int attempt = 0; attempt < 5 && !result.alive(); ++attempt) {
+    for (int attempt = 0; attempt < 10 && !result.alive(); ++attempt) {
         gpio_set_level(SD_CS_PIN, 0);
         SdDelayTicks();
-        for (uint8_t byte : cmd0) SdTransfer(byte);
-        result.cmd0_resp = SdReadResponse();
+        SdTransfer(0xFF, &result);  // CS 下降沿后的一个哑字节，给卡一点建立时间
+        for (uint8_t byte : cmd0) SdTransfer(byte, &result);
+        result.cmd0_resp = SdReadResponse(&result);
         gpio_set_level(SD_CS_PIN, 1);
-        SdTransfer(0xFF);
+        SdTransfer(0xFF, &result);
         result.cmd0_tries = attempt + 1;
-        if (!result.alive()) esp_rom_delay_us(2000);
+        if (!result.alive()) esp_rom_delay_us(5000);
     }
 
     if (result.alive()) {
         const uint8_t cmd8[6] = {0x48, 0x00, 0x00, 0x01, 0xAA, 0x87};
         gpio_set_level(SD_CS_PIN, 0);
         SdDelayTicks();
-        for (uint8_t byte : cmd8) SdTransfer(byte);
-        result.cmd8_resp = SdReadResponse();
+        for (uint8_t byte : cmd8) SdTransfer(byte, &result);
+        result.cmd8_resp = SdReadResponse(&result);
         gpio_set_level(SD_CS_PIN, 1);
-        SdTransfer(0xFF);
+        SdTransfer(0xFF, &result);
     }
 
     gpio_reset_pin(SD_CS_PIN);
@@ -136,13 +151,22 @@ std::string DescribeProbe(const SdProbe& probe) {
         return text;
     }
     std::snprintf(text, sizeof(text),
-                  "总线自检：DAT0 空闲=%d（正常应为 1），CMD0 尝试 %d 次无应答(0x%02X)",
-                  probe.dat0_idle, probe.cmd0_tries, probe.cmd0_resp);
+                  "总线自检：DAT0 空闲=%d（正常应为 1，全程低电平位数=%d），"
+                  "CMD0 尝试 %d 次无应答(0x%02X)",
+                  probe.dat0_idle, probe.miso_low_bits, probe.cmd0_tries,
+                  probe.cmd0_resp);
     std::string why = text;
     if (probe.dat0_idle == 0) {
         why += "；DAT0 被拉死在 0，检查卡座该脚是否虚焊/短地";
+    } else if (!probe.miso_saw_zero) {
+        // DAT0 全程恒 1：这条线上没有任何器件在驱动它，主机读到的只是上拉。
+        why += "；DAT0 全程无低电平，说明卡根本没在 DAT0 上应答——"
+               "优先查卡座是否插到底、卡座 DAT0/CMD/CLK 三脚是否真接到 MCU"
+               "（GPIO2/5/4）、卡座 3V3 在插卡瞬间是否跌落";
     } else {
-        why += "；卡未应答，重点查卡座是否插到底、3V3 是否到卡座、CLK/CMD 走线";
+        // 出现过低电平但没形成合法响应：通信在发生，只是没握上手。
+        why += "；DAT0 有跳变但无合法响应，多为 CLK 频率/上电时序问题，"
+               "或 CS（GPIO1）实际接到了别的脚";
     }
     return why;
 }
@@ -182,6 +206,19 @@ SdCardStorage::~SdCardStorage() {
 
 bool SdCardStorage::Mount() {
     mount_error_.clear();
+
+    // 预检：卡座没有 CD 脚，空座 / 卡没插到底 / 卡座没供电，在
+    // esp_vfs_fat_sdspi_mount 眼里都只是 ESP_ERR_TIMEOUT，要等满三轮才能
+    // 下结论。这里先用 GPIO 直接打一条 CMD0：没应答就立刻返回可操作的结论，
+    // 有应答再交给 SDSPI 走正常挂载流程（此时再失败就只可能是文件系统/参数）。
+    const SdProbe pre = BitBangProbe();
+    if (!pre.alive()) {
+        mount_error_ = "未检测到 TF 卡。" + DescribeProbe(pre);
+        ESP_LOGW(kTag, "TF card not responding: %s", mount_error_.c_str());
+        return false;
+    }
+    ESP_LOGI(kTag, "TF pre-probe OK: %s", DescribeProbe(pre).c_str());
+
     spi_bus_config_t bus = {};
     bus.mosi_io_num = SD_MOSI_PIN;
     bus.miso_io_num = SD_MISO_PIN;
@@ -232,8 +269,18 @@ bool SdCardStorage::Mount() {
             spi_bus_free(SD_SPI_NUM);
             const SdProbe probe = BitBangProbe();
             const std::string detail = DescribeProbe(probe);
-            ESP_LOGW(kTag, "TF card not responding: %s", detail.c_str());
-            mount_error_ = "未检测到 TF 卡。" + detail;
+            if (probe.alive()) {
+                // 卡能被寻址，说明引脚/供电/卡座都是通的，卡住的是 SDSPI 的
+                // 挂载（初始化波特率或卡上电偏慢）。不能再报「未检测到卡」，
+                // 否则现场会去乱查硬件。
+                ESP_LOGW(kTag, "TF bus OK but SDSPI mount timed out: %s", detail.c_str());
+                mount_error_ =
+                    "TF 卡能被寻址（CMD0 已应答）但 SPI 挂载超时，多为卡座接触不稳"
+                    "或卡上电较慢，请重新插拔后再试。" + detail;
+            } else {
+                ESP_LOGW(kTag, "TF card not responding: %s", detail.c_str());
+                mount_error_ = "未检测到 TF 卡。" + detail;
+            }
             return false;
         }
         if (err == ESP_FAIL) {

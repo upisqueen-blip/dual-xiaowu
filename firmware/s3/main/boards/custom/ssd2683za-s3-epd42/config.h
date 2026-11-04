@@ -94,6 +94,14 @@
 #define EPD_CS_PIN_FPC2    EPD_COLOR_CS_PIN
 #define EPD_BUSY_PIN_FPC2  EPD_COLOR_BUSY_PIN
 
+// 开机墨水屏自检：1 = 开机先连刷「全黑 / 全白 / 横条纹」三张纯色图（约 12 秒）
+// 再进入正常首页。用于现场区分「面板不驱动」和「软件没取到图」：
+// 三张图肉眼有变化 → 驱动链路正常；完全没有变化 → 面板没有驱动电压。
+// 出厂量产固件必须改回 0。
+#ifndef EPD_BOOT_SELFTEST
+#define EPD_BOOT_SELFTEST 0  // 面板链路已验证，关闭开机自检（省约 30 秒启动时间）
+#endif
+
 // 双屏配置开关：1 = FPC1 快刷屏 + FPC2 SSD2683ZA 四色屏同时驱动；
 // 0 = 仅快刷屏（旧行为，三色屏代码不初始化）。
 #ifndef EPD_ENABLE_COLOR_SCREEN
