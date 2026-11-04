@@ -231,7 +231,27 @@ bool Ssd2683zaColorPanel::Init() {
         SendCommandOnly(0x04);  // Power on.
         vTaskDelay(pdMS_TO_TICKS(100));
         ok = gpio_get_level(EPD_COLOR_BUSY_PIN) == busy_active_level_;
-        if (ok) ok = WaitBusy(10000);
+        if (ok) {
+            // 四色（BWRY）模组的 PON 要先把内部 DC/DC 拉起来，实测远远超过
+            // 原定的 10 秒；旧值会让一块完全正常的彩屏在开机阶段被判「不存在」，
+            // 之后整场降级成单屏（日志：FPC2 probe failed → keeping FPC1 active）。
+            // 放宽到 30 秒并把实际耗时打出来，便于判断是真忙还是脚被拉死。
+            const TickType_t pon_start = xTaskGetTickCount();
+            ok = WaitBusy(30000);
+            ESP_LOGI(kTag, "FPC2 PON 完成：%s，耗时 %lu ms",
+                     ok ? "成功" : "超时",
+                     static_cast<unsigned long>(
+                         (xTaskGetTickCount() - pon_start) * portTICK_PERIOD_MS));
+            if (!ok) {
+                // 典型症状：面板其实在线、BUSY 也会被拉高，但四色命令序列不被
+                // 识别（3 色 UC1679/SSD1683 模组收到 SSD2683ZA 的 0x06/0x01 配置
+                // 后进不了正常上电流程），PON 后 BUSY 一直保持忙直到超时。
+                ESP_LOGE(kTag,
+                         "FPC2 按 4-color(SSD2683ZA BWRY) 驱动上电超时。若该机 B 屏"
+                         "实际是 3-color(B/W/R) UC1679/SSD1683 面板，请在 menuconfig "
+                         "把「FPC2 panel colors」改为 3-color 后重新编译。");
+            }
+        }
         else {
             ESP_LOGW(kTag,
                      "FPC2 panel did not assert BUSY after PON (GPIO%d=%d)",
