@@ -1050,7 +1050,7 @@ function ScreenSettings({ value, onChange, sceneKey, bMode, deviceMac }: { value
     ? `${BASE_PATH}/api/preview?persona=DUAL_B&w=400&h=300&colors=${value.colors}&forceColors=${value.colors}&mac=${encodeURIComponent(deviceMac)}&v=${value.colors}`
     : `${BASE_PATH}/api/preview?persona=DUAL_B&w=400&h=300&colors=${value.colors}&sceneKey=${encodeURIComponent(sceneKey)}&bMode=${encodeURIComponent(bMode)}&v=${value.colors}`;
   return <div className="card-pad screen-settings">
-    <div className="tt-grid-head"><span>屏幕规格</span><span className="tt-hint">决定 B 屏按几色渲染，需与设备实际面板一致（三色板选四色时，黄色会显示为白）</span></div>
+    <div className="tt-grid-head"><span>屏幕规格</span><span className="tt-hint">决定 B 屏按几色渲染，需与设备实际面板一致（三色板选四色时，黄色会按红色出）</span></div>
     <div className="ss-row">
       <label>屏幕尺寸<select className="cs-input" value={value.size} onChange={(e) => onChange({ ...value, size: e.target.value as "4.2" | "5.83" })}>
         <option value="4.2">4.2 寸（400 × 300）</option>
