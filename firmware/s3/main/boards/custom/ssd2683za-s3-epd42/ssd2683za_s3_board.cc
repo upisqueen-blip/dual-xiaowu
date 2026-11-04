@@ -150,36 +150,49 @@ private:
     // 快照 JSON：{"mounted":true,"status":"...","categories":{"images":[...],"audio":[...],"books":[...],"recordings":[...]}}
     void ReportTfStorage() {
         if (inksight_server_.empty() || GetNetwork() == nullptr) return;
-        if (!storage_.mounted()) {
+        // 开机时的挂载可能早于用户插卡，第一次 SPI 握手也可能偶发失败（卡座
+        // 是自弹式、没有独立 CD 脚，空座和接触不良在协议层无法区分）。上报前
+        // 补一次挂载重试。
+        if (!storage_.mounted()) storage_.EnsureMounted();
+        const bool card_ok = storage_.mounted();
+        if (!card_ok) {
             const std::string& me = storage_.MountError();
-            if (me.empty()) {
-                ESP_LOGI(kTag, "TF 卡未挂载，跳过存储上报");
-            } else {
-                ESP_LOGI(kTag, "TF 卡未挂载，跳过存储上报（原因：%s）", me.c_str());
-            }
-            return;
+            ESP_LOGI(kTag, "TF 卡未挂载：%s",
+                     me.empty() ? "未检测到 TF 卡（卡座为空或接触不良）" : me.c_str());
         }
+        // 关键：失败也要上报。以前挂载失败直接 return，后台「本地 TF 卡」面板
+        // 永远显示「暂无 TF 卡上报数据」，用户和自己都分不清是没插卡、触点
+        // 接触不良、格式不对还是固件没走到这里。现在把 mounted=false + 原因
+        // 写进快照，面板会直接显示未挂载和具体原因。
         cJSON* root = cJSON_CreateObject();
-        cJSON_AddBoolToObject(root, "mounted", true);
-        cJSON_AddStringToObject(root, "status", storage_.Status().c_str());
-        cJSON* cats = cJSON_CreateObject();
-        for (const char* cat : {"images", "audio", "books", "recordings"}) {
-            cJSON* arr = cJSON_CreateArray();
-            std::string listing = storage_.List(cat);
-            if (!listing.empty() && listing != "(empty)") {
-                size_t start = 0;
-                while (true) {
-                    size_t nl = listing.find('\n', start);
-                    const size_t len = (nl == std::string::npos) ? std::string::npos : nl - start;
-                    std::string name = listing.substr(start, len);
-                    if (!name.empty()) cJSON_AddItemToArray(arr, cJSON_CreateString(name.c_str()));
-                    if (nl == std::string::npos) break;
-                    start = nl + 1;
+        cJSON_AddBoolToObject(root, "mounted", card_ok);
+        if (card_ok) {
+            cJSON_AddStringToObject(root, "status", storage_.Status().c_str());
+            cJSON* cats = cJSON_CreateObject();
+            for (const char* cat : {"images", "audio", "books", "recordings"}) {
+                cJSON* arr = cJSON_CreateArray();
+                std::string listing = storage_.List(cat);
+                if (!listing.empty() && listing != "(empty)") {
+                    size_t start = 0;
+                    while (true) {
+                        size_t nl = listing.find('\n', start);
+                        const size_t len = (nl == std::string::npos) ? std::string::npos : nl - start;
+                        std::string name = listing.substr(start, len);
+                        if (!name.empty()) cJSON_AddItemToArray(arr, cJSON_CreateString(name.c_str()));
+                        if (nl == std::string::npos) break;
+                        start = nl + 1;
+                    }
                 }
+                cJSON_AddItemToObject(cats, cat, arr);
             }
-            cJSON_AddItemToObject(cats, cat, arr);
+            cJSON_AddItemToObject(root, "categories", cats);
+        } else {
+            const std::string& me = storage_.MountError();
+            const std::string reason =
+                me.empty() ? std::string("未检测到 TF 卡（卡座为空或接触不良）") : me;
+            cJSON_AddStringToObject(root, "status", reason.c_str());
+            cJSON_AddStringToObject(root, "reason", reason.c_str());
         }
-        cJSON_AddItemToObject(root, "categories", cats);
         char* payload = cJSON_PrintUnformatted(root);
         std::string snapshot = payload ? payload : "{}";
         if (payload) free(payload);
