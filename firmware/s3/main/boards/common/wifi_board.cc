@@ -205,7 +205,11 @@ void WifiBoard::StartWifiConfigMode() {
         // E-paper needs a persistent, dedicated provisioning page. A regular
         // Alert only updates transient LCD/chat widgets and leaves the
         // dashboard home page visible.
-        Board::GetInstance().GetDisplay()->ShowActivationUi(hint.c_str(), "");
+        // 墨水屏上还要再进一步：Alert 只画一小条覆盖层，用户根本看不清热点名
+        // 和配网网址，所以走 ShowProvisioningGuide() 渲染整屏配网指引。
+        Board::GetInstance().GetDisplay()->ShowProvisioningGuide(
+            wifi_manager.GetApSsid().c_str(),
+            wifi_manager.GetApWebUrl().c_str());
     });
 #elif CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
     auto &blufi = Blufi::GetInstance();

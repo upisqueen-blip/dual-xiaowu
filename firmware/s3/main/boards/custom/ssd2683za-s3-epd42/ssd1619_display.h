@@ -20,6 +20,7 @@ public:
     void SetEmotion(const char* emotion) override;
     void SetChatMessage(const char* role, const char* content) override;
     void ShowActivationUi(const char* message, const char* code) override;
+    void ShowProvisioningGuide(const char* ssid, const char* url) override;
     void HideActivationUi() override;
     void ClearChatMessages() override;
     void SetupUI() override;

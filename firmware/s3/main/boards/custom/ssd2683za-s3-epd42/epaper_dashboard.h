@@ -44,7 +44,7 @@ public:
     enum class Page {
         kHome, kConversation, kSpeaking, kReading, kWords, kSchedule,
         kCalendar, kBookReader, kNotes, kTodo, kQuota, kInkSight,
-        kAnalysis, kProfile, kActivation, kWelcome, kCount
+        kAnalysis, kProfile, kActivation, kProvisioning, kWelcome, kCount
     };
 
     EpaperDashboard();
@@ -112,6 +112,10 @@ public:
     void SetSpeakingStatus(std::string status);
     void ShowActivation(std::string message, std::string code);
     void HideActivation();
+    // 未配网时的整屏配网指引页：热点名 + 配网地址 + 后续激活码引导。
+    // 用独立页面而不是 Alert 提示框，因为墨水屏上 Alert 只画一小条覆盖层，
+    // 用户根本看不清要连哪个热点、打开什么网址。
+    void ShowProvisioning(std::string ssid, std::string url);
 
 private:
     // One reader page: plain text, or a full-screen image when image is set.
@@ -153,6 +157,7 @@ private:
     lv_obj_t* welcome_image_ = nullptr;
     std::unique_ptr<LvglImage> book_image_data_;
     std::unique_ptr<LvglImage> welcome_image_data_;
+    std::unique_ptr<LvglImage> provisioning_image_data_;
     std::string loaded_book_image_;
     std::function<std::unique_ptr<LvglImage>(const std::string&)>
         book_image_loader_;
@@ -169,11 +174,14 @@ private:
     std::string speaking_status_;
     std::string activation_message_;
     std::string activation_code_;
+    std::string provisioning_ssid_;
+    std::string provisioning_url_;
 
     void EnsureUi();
     void Render();
     void EnsureBookImageLoaded(const std::string& name);
     void EnsureWelcomeImageLoaded();
+    void EnsureProvisioningImageLoaded();
     std::string RenderHome() const;
     std::string RenderSpeaking() const;
     std::string RenderReading() const;

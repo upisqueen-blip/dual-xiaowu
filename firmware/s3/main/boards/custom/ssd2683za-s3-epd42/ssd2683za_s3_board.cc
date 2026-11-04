@@ -987,9 +987,21 @@ private:
             cleanup();
             return;
         }
+        const bool was_unbound = inksight_device_unbound_.exchange(device_unbound);
+        // 已绑定、但后台还没配任何双屏内容（也没手动指定 persona）：A 屏保
+        // 持开机欢迎页，引导用户去后台配置；B 屏由 RefreshInkSightColor 继续
+        // 渲染默认天气。否则后端对"未配置设备"会返回便签占位页，把欢迎页盖掉，
+        // 用户配完网看到的是一张空白便签，以为设备坏了。
+        // 只在当前正停在欢迎页时拦截：用户若是手动翻到看板页，仍让他看到
+        // 后端返回的占位画面，不至于点了没反应。
+        if (!device_unbound && !dual_mode_.load() && persona.empty() &&
+            display_->dashboard().IsWelcome()) {
+            ESP_LOGI(kTag, "后台未配置双屏内容：A 屏保持欢迎页（B 屏继续刷天气）");
+            cleanup();
+            return;
+        }
         display_->RawFrameRefresh(inksight_frame_,
                                   !initial_full_refresh /* partial */);
-        const bool was_unbound = inksight_device_unbound_.exchange(device_unbound);
         if (device_unbound) {
             display_->dashboard().SetInkSightFooter(
                 pair_code.empty() ? "未绑定：配对码见 FPC1 · OK刷新"
@@ -1785,15 +1797,18 @@ public:
         } else {
             ESP_LOGI(kTag, "XiaowuAI server (NVS): %s", inksight_server_.c_str());
         }
-        // A 屏首屏统一显示欢迎页（用户要求：配网/激活后默认欢迎页，引导去后台配置屏幕内容；
-        // 按 OK 进入功能菜单）。B 屏网络图在并行任务中拉取并刷新，两块屏互不干扰。
-        // 未配置 InkSight 时同样显示欢迎页。
+        // A 屏首屏策略：开机始终先渲染欢迎页作为兜底，保证屏幕永不空白。
+        // 注意：这里不能用「inksight_server_ 是否为空」来判断是否已配置——
+        // 上面紧邻的兜底分支会把空的 server 填成编译期默认域名
+        // （INKSIGHT_DEFAULT_SERVER_URL，非空），所以 inksight_server_ 永远非空，
+        // 那样写 ShowBootHome() 会变成死代码：新板子/未配网设备开机后 A 屏
+        // 一片空白，只在进配网模式时闪一个提示框（实测 black_pixels=22029，
+        // 而欢迎页应为 14363）。
+        // 正确做法：先显示欢迎页；已绑定且后台配了双屏内容的设备，
+        // RefreshDualScreens 成功后会用 RawFrameRefresh 把 A 屏覆盖成网络图
+        // （大盘全景等）；未配置/未配网的设备就停在欢迎页引导去后台配置。
         display_->ShowBootHome();
-        if (!inksight_server_.empty()) {
-            ESP_LOGI(kTag, "已配置 XiaowuAI/双屏：A 屏显示欢迎页，B 屏并行拉取网络图");
-        } else {
-            ESP_LOGI(kTag, "未配置 XiaowuAI：A 屏显示欢迎页");
-        }
+        ESP_LOGI(kTag, "A 屏首屏显示欢迎页（已配置双屏内容时将被网络图覆盖）");
         display_->dashboard().SetInkSightShow(
             [this](bool initial_full) {
                 Application::GetInstance().Schedule(

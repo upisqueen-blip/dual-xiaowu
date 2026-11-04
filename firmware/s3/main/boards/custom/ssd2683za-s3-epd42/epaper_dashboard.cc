@@ -15,6 +15,7 @@
 #include <cJSON.h>
 #include "settings.h"
 #include "welcome_png.h"
+#include "provisioning_png.h"
 
 LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
 LV_FONT_DECLARE(BUILTIN_ICON_FONT);
@@ -264,6 +265,7 @@ const char* EpaperDashboard::PageName(Page page) {
         case Page::kAnalysis: return "学情分析";
         case Page::kProfile: return "用户中心";
         case Page::kActivation: return "设备配网与激活";
+        case Page::kProvisioning: return "配网指引";
         case Page::kWelcome: return "欢迎";
         default: return "首页";
     }
@@ -402,7 +404,7 @@ void EpaperDashboard::Show(Page page) {
             page == Page::kHome || page == Page::kBookReader ||
             page == Page::kConversation || page == Page::kInkSight ||
             page == Page::kSpeaking || page == Page::kActivation ||
-            page == Page::kWelcome ||
+            page == Page::kWelcome || page == Page::kProvisioning ||
             transitions_since_full_ >= kTransitionsPerFull;
         if (always_full) transitions_since_full_ = 0;
         else ++transitions_since_full_;
@@ -489,6 +491,16 @@ void EpaperDashboard::ShowActivation(std::string message, std::string code) {
 
 void EpaperDashboard::HideActivation() {
     if (page_ == Page::kActivation) Show(Page::kHome);
+    // 配网指引页在配网完成后必须退出，否则会一直停在"请连接热点"，
+    // 用户会以为没配上。回到欢迎页作为默认首屏（随后若需要激活，
+    // 服务器下发的激活码页会覆盖它；已绑定则停在欢迎页等后台配内容）。
+    else if (page_ == Page::kProvisioning) Show(Page::kWelcome);
+}
+
+void EpaperDashboard::ShowProvisioning(std::string ssid, std::string url) {
+    provisioning_ssid_ = std::move(ssid);
+    provisioning_url_ = std::move(url);
+    Show(Page::kProvisioning);
 }
 
 void EpaperDashboard::Next() {
@@ -644,6 +656,18 @@ void EpaperDashboard::EnsureWelcomeImageLoaded() {
             const_cast<uint8_t*>(welcome_png), welcome_png_len);
     } catch (...) {
         welcome_image_data_.reset();
+    }
+}
+
+void EpaperDashboard::EnsureProvisioningImageLoaded() {
+    if (provisioning_image_data_ != nullptr) return;
+    // 配网指引同样走烘焙 PNG：这块 SSD1619 上 LVGL 中文正文几乎不出墨
+    // （黑底白字条能看见、正文刷不出来），图片通道才可靠。
+    try {
+        provisioning_image_data_ = std::make_unique<LvglAllocatedImage>(
+            const_cast<uint8_t*>(provisioning_png), provisioning_png_len);
+    } catch (...) {
+        provisioning_image_data_.reset();
     }
 }
 
@@ -1355,6 +1379,22 @@ void EpaperDashboard::Render() {
         case Page::kAnalysis: body = RenderAnalysis(); break;
         case Page::kProfile: body = RenderProfile(); break;
         case Page::kActivation: body = activation_message_; break;
+        case Page::kProvisioning: {
+            // 未配网整屏指引。墨水屏全刷要几十秒，必须一屏把用户要做的
+            // 全部说清：连哪个热点（下方黑底条）、打开什么网址、之后去哪
+            // 输入激活码。字号用全局 20px 字体，400px 宽约容 19 个汉字，
+            // 每行控制在 18 字以内避免折行。
+            const std::string url =
+                provisioning_url_.empty() ? "192.168.4.1" : provisioning_url_;
+            body = "设备未联网，请按步骤配网\n\n";
+            body += "1 手机连下方热点\n";
+            body += "2 浏览器打开 " + url + "\n";
+            body += "3 选家庭 WiFi 输密码\n";
+            body += "4 屏幕显示 6 位激活码\n";
+            body += "5 打开 xiaozhi.me\n";
+            body += "  输入激活码完成绑定";
+            break;
+        }
         case Page::kWelcome: body = RenderWelcome(); break;
         case Page::kInkSight:
             // InkSight 画面直接通过 HTTP 解码后刷显存，LVGL title/body
@@ -1412,23 +1452,33 @@ void EpaperDashboard::Render() {
         std::snprintf(footer, sizeof(footer), "当前：%s  ·  +/-选择  ·  OK唤醒",
                       menu_names[selected_item_]);
         lv_label_set_text(footer_, footer);
-    } else if (page_ == Page::kWelcome) {
-        // 欢迎页：优先显示烘焙好的全屏欢迎图（logo + 欢迎语 + 售后群）；
-        // 仅在图像缺失时回退到纯文本引导文案。
+    } else if (page_ == Page::kWelcome || page_ == Page::kProvisioning) {
+        // 欢迎页 / 配网页都优先显示编译期烘焙的全屏 PNG（logo、欢迎语，
+        // 或配网 5 步指引）。这块 SSD1619 上 LVGL 中文正文几乎不出墨：
+        // 实测黑底白字条能看见，20px 正文字形却刷不出来，所以整屏信息
+        // 一律走图片通道；只有图片解码失败时才回退到纯文本。
         lv_obj_add_flag(menu_, LV_OBJ_FLAG_HIDDEN);
-        EnsureWelcomeImageLoaded();
-        if (welcome_image_data_ != nullptr) {
-            const lv_img_dsc_t* dsc = welcome_image_data_->image_dsc();
-            lv_image_set_src(welcome_image_, dsc);
+        const bool provisioning = (page_ == Page::kProvisioning);
+        if (provisioning) {
+            EnsureProvisioningImageLoaded();
+        } else {
+            EnsureWelcomeImageLoaded();
+        }
+        LvglImage* banner = provisioning ? provisioning_image_data_.get()
+                                         : welcome_image_data_.get();
+        if (banner != nullptr) {
+            lv_image_set_src(welcome_image_, banner->image_dsc());
             lv_obj_align(welcome_image_, LV_ALIGN_TOP_LEFT, 0, 0);
             lv_obj_remove_flag(welcome_image_, LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(body_, LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(footer_, LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(title_, LV_OBJ_FLAG_HIDDEN);
         } else {
+            lv_obj_add_flag(welcome_image_, LV_OBJ_FLAG_HIDDEN);
             lv_obj_remove_flag(body_, LV_OBJ_FLAG_HIDDEN);
             lv_obj_remove_flag(footer_, LV_OBJ_FLAG_HIDDEN);
-            lv_label_set_text(footer_, "按 OK 进入功能菜单");
+            lv_label_set_text(footer_, provisioning ? "配网成功后自动继续"
+                                                    : "按 OK 进入功能菜单");
         }
     } else {
         lv_obj_add_flag(menu_, LV_OBJ_FLAG_HIDDEN);

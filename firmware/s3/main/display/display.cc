@@ -55,6 +55,17 @@ void Display::ShowActivationUi(const char* message, const char* code) {
     SetChatMessage("system", content.c_str());
 }
 
+void Display::ShowProvisioningGuide(const char* ssid, const char* url) {
+    std::string content = "设备未联网，请按下面步骤配网\n\n";
+    content += "1 手机连接热点 ";
+    content += (ssid && ssid[0] != '\0') ? ssid : "Xiaowu-XXXX";
+    content += "\n2 浏览器打开 ";
+    content += (url && url[0] != '\0') ? url : "192.168.4.1";
+    content += "\n3 选择家庭 WiFi 并输入密码";
+    content += "\n\n配网成功后屏幕显示 6 位激活码，\n打开 xiaozhi.me 输入即可绑定";
+    ShowActivationUi(content.c_str(), "");
+}
+
 void Display::HideActivationUi() { SetChatMessage("system", ""); }
 
 void Display::ClearChatMessages() {

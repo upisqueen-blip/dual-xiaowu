@@ -36,6 +36,10 @@ public:
     virtual void SetEmotion(const char* emotion);
     virtual void SetChatMessage(const char* role, const char* content);
     virtual void ShowActivationUi(const char* message, const char* code);
+    // 未配网时的整屏配网指引（热点名 + 配网网址）。墨水屏必须有一张常驻的
+    // 专用页面，普通 Alert 只画一条覆盖层，用户看不清要连哪个热点。
+    // 默认实现退化到 ShowActivationUi，保证其它板型行为不变。
+    virtual void ShowProvisioningGuide(const char* ssid, const char* url);
     virtual void HideActivationUi();
     virtual void ClearChatMessages();
     virtual void SetTheme(Theme* theme);

@@ -202,6 +202,10 @@ void Ssd1619Display::ShowActivationUi(const char* message, const char* code) {
     dashboard_.ShowActivation(message ? message : "", code ? code : "");
 }
 
+void Ssd1619Display::ShowProvisioningGuide(const char* ssid, const char* url) {
+    dashboard_.ShowProvisioning(ssid ? ssid : "", url ? url : "");
+}
+
 void Ssd1619Display::HideActivationUi() { dashboard_.HideActivation(); }
 
 void Ssd1619Display::InitializeSpi() {
@@ -795,11 +799,22 @@ bool Ssd1619Display::RefreshOnce(const uint8_t* data, bool partial) {
     SetRamWindow();
     Command(0x24);
     Data(data, kFrameBytes);
-    // The 4.2-inch SSD1619 reference sequence writes both RAM planes for a
-    // monochrome full refresh.
+    // 0x26 是控制器的「旧画面」参考平面。SSD1619 快刷屏的 OTP 全刷波形是差分
+    // 的：它逐像素比较 0x24(新) 与 0x26(旧)，只有两者不同的像素才会被真正
+    // 驱动（相同则给 VSS，一伏都不加）。
+    // 旧实现把同一份 data 先写 0x24 再写 0x26，等于告诉控制器「整屏没有任何
+    // 变化」：波形照跑、BUSY 照翻转、日志照打 "Full refresh complete"，玻璃上
+    // 却一个墨点都不动——这正是「后台配置/配网指引都刷不上去」的真正原因。
+    // 也只有上电后的第一帧能看见（那时 0x26 还是上电残留值，全屏都算「有
+    // 变化」），之后 0x26 被写成和 0x24 一样，屏就永久冻在那一帧。
+    // 这里把旧平面填成新画面的反相：每个像素都判为变化，按目标极性全量驱动，
+    // 等效于一次干净的全刷（对绝对波形（非差分）的面板无副作用，0x26 不参与）。
+    for (size_t i = 0; i < kFrameBytes; ++i) {
+        panel_frame_[i] = static_cast<uint8_t>(~data[i]);
+    }
     SetRamWindow();
     Command(0x26);
-    Data(data, kFrameBytes);
+    Data(panel_frame_, kFrameBytes);
     const uint8_t update = 0xf7;
     // 同上：触发前先把 BUSY 排到空闲，避免 0x20 被忽略。
     WaitBusy(2000);
