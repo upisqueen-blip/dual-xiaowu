@@ -46,6 +46,17 @@ const config = {
   env: {
     NEXT_PUBLIC_CONTENT_CONSOLE_URL: contentConsole,
   },
+  // Next 15+ 在 dev 下会校验 /_next 资源请求的来源域名。本地改用域名访问
+  // （dual.localhost，经 dev-proxy 转发）时，Host 不再是 localhost / IP，
+  // 不放行就会被判定跨域，表现为 HMR 握手失败、页面一直转圈。
+  // 线上走标准域名访问，不受此项影响。
+  allowedDevOrigins: (
+    process.env.ALLOWED_DEV_ORIGINS ||
+    "localhost,127.0.0.1,dual.localhost,dualcn.localhost"
+  )
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
   async rewrites() {
     return [
       backend && { source: "/backend/:path*", destination: `${backend}/:path*` },

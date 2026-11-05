@@ -10,6 +10,7 @@ __pycache__/
 *.db-shm
 *.db-wal
 .env
+.env*.local
 runtime_uploads/
 uploads/
 dist/
@@ -18,3 +19,6 @@ build/
 
 # WorkBuddy local agent workspace
 .workbuddy/
+
+# local dev-proxy TLS material (private keys never leave the machine)
+dev-proxy/certs/

@@ -35,7 +35,8 @@ const nextConfig: NextConfig = {
   // Next.js 15+ 默认拦截"跨域"dev 资源（含 HMR WebSocket）。用 127.0.0.1 访问时
   // 会被判定为跨域，导致 /_next/hmr 握手被拒、页面 hydration 永远挂起（一直转圈）。
   // 允许的 dev 来源（仅开发期跨域/HMR 校验用），可用 .env 的 ALLOWED_DEV_ORIGINS 覆盖（逗号分隔）。
-  allowedDevOrigins: (process.env.ALLOWED_DEV_ORIGINS || "localhost,127.0.0.1,192.168.1.4,192.168.1.5,192.168.1.69,192.168.101.69")
+  // dual.localhost / dualcn.localhost 为本地域名复刻模式（dev-proxy）使用。
+  allowedDevOrigins: (process.env.ALLOWED_DEV_ORIGINS || "localhost,127.0.0.1,dual.localhost,dualcn.localhost,192.168.1.4,192.168.1.5,192.168.1.69,192.168.101.69")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean),

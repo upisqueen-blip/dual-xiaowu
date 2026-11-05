@@ -1,0 +1,11 @@
+{
+  "_comment": "本地域名 -> 上游端口。改完保存即可生效（无需重启代理，server.js 会在每次请求时热读本文件）。",
+  "dual.localhost": {
+    "port": 8101,
+    "label": "创作者门户 / 运营总览 /center（/backend 与 /admin 由 Next 自己反代）"
+  },
+  "dualcn.localhost": {
+    "port": 8094,
+    "label": "内容配置台（根路径部署，basePath 为空）"
+  }
+}
