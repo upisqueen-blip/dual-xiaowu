@@ -15,18 +15,38 @@
 
 前两条决定了「登录态、跨域、跳转」这类问题能不能在本地复现；后两条决定「路径拼接、静态资源 404」能不能在本地复现。
 
-## 三条命令跑起来
+## 一条命令跑起来（推荐）
 
 ```bat
-REM 1) 后端（8104）+ 两个前端（8094 / 8101）
-start_all.bat
-
-REM 2) 切到域名模式（写两个 app 的 .env.local）
-switch-env.bat domain
-
-REM 3) 起域名代理（保持窗口开着）
-dev-proxy\start.bat
+dev-domain.bat
 ```
+
+它按顺序做五件事：切到域名模式 → 重启两个前端（`.env.local` 只在启动时读）→ 后端 8104 没起就拉起 → 起代理（80）→ 打开浏览器。
+
+> **PowerShell 里必须带 `.\` 前缀**，这是 PowerShell 的安全设计（不加载当前目录的命令）：
+> ```powershell
+> .\dev-domain.bat        # 不是 dev-domain.bat
+> .\switch-env.bat domain # 不是 switch-env.bat domain
+> ```
+> cmd 窗口里不需要前缀。
+
+## 分步执行（排查时用）
+
+```bat
+start_all.bat            REM 后端 8104 + 前端 8094 / 8101（常驻，开机跑一次）
+switch-env.bat domain    REM 写两个 app 的 .env.local（只在切环境时跑）
+dev-proxy\start.bat      REM 起域名代理，保持窗口开着（每次要用域名时跑）
+```
+
+三条命令的"必要性"不一样：
+
+| 命令 | 什么时候跑 | 不跑的后果 |
+|---|---|---|
+| `start_all.bat` | 开机 / 服务关掉后 | 端口没人监听，域名页显示"上游没有响应" |
+| `switch-env.bat domain` | 第一次切、或从 local/online 切回来 | `.env.local` 还是旧值，跳转仍指向 `localhost:端口` |
+| `dev-proxy\start.bat` | 每次要用域名时 | 域名打不开（浏览器连不上 80） |
+
+**最容易踩的坑**：`switch-env.bat` 只是写文件，Next 只在启动时读 `.env.local`。改完不重启前端 = 没生效。`dev-domain.bat` 已经帮你重启了。
 
 然后访问：
 
