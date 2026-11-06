@@ -3,11 +3,17 @@ REM ============================================================
 REM  Xiaowu all-in-one launcher (ASCII version)
 REM  Starts backend 8104, content-console 8094, pc-console 8101
 REM  Double-click to run. Close service windows to stop.
+REM
+REM  Optional 1st word picks the DEVICE (firmware) backend:
+REM     start_all.bat local     device -> this PC (needs reflash)
+REM     start_all.bat online    device -> cloud
+REM  With no argument the device setting is left untouched.
 REM ============================================================
 
 set "ROOT=E:\electron\screen\inksight-main\inksight-main\xiaowu-s3-open-platform"
 set "VENV=%ROOT%\.venv\Scripts\python.exe"
 set "BACKEND_URL=http://127.0.0.1:8104"
+set "DEVARG=%~1"
 
 echo ============================================================
 echo  Xiaowu all-in-one launcher
@@ -46,6 +52,17 @@ echo      Content console:  http://localhost:8101/admin
 echo.
 echo  Tip: open 8094 or 8101 in your browser after a few seconds.
 echo  To stop: close the corresponding command windows.
+echo.
+ping -n 4 127.0.0.1 >nul
+echo  ------------------------------------------------------------
+echo   DEVICE (firmware) backend
+echo  ------------------------------------------------------------
+if /i "%DEVARG%"=="local"  call "%ROOT%\device-env.bat" local
+if /i "%DEVARG%"=="online" call "%ROOT%\device-env.bat" online
+call "%ROOT%\device-env.bat" lan
+echo.
+echo  To switch the DEVICE to this PC:  device-env.bat local flash
+echo  To switch it back to the cloud:   device-env.bat online flash
 echo.
 pause
 goto :eof

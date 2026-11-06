@@ -163,6 +163,21 @@
 #define FPC2_FRAME_BYTES   (FPC2_WIDTH * FPC2_HEIGHT / 4) // 2bpp 彩色帧
 
 // ---------------------------------------------------------------------------
+// 本地联调后端覆盖（可选文件，由仓库根目录的 device-env.bat 生成，
+// 已被 .gitignore 忽略，不进版本库）。
+//
+// 文件内容形如：
+//   #define INKSIGHT_DEFAULT_SERVER_URL  "http://192.168.1.7:8104"
+//   #define INKSIGHT_SERVER_CANDIDATES   "http://192.168.1.7:8104,https://..."
+//
+// 下面的 `#ifndef` 守卫意味着这里定义的值会覆盖本文件末尾的默认值；
+// 删掉该文件即恢复出厂默认（纯线上域名），不需要改任何源码。
+// ---------------------------------------------------------------------------
+#if __has_include("local_server.h")
+#  include "local_server.h"
+#endif
+
+// ---------------------------------------------------------------------------
 // InkSight /api/render 后端地址（默认走线上域名，免手动配置）。
 // 设备联网后按以下顺序确定后端（见 InkSightClient::ResolveServerUrl）：
 //   1) NVS 手工覆盖（KEY- 配网 / MCP set_inksight_server 写入的 server_url）：
