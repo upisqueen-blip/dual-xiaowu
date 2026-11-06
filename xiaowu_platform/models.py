@@ -153,6 +153,16 @@ class PairingConfirmIn(BaseModel):
     device_id: str = Field(min_length=4, max_length=64)
 
 
+class PomodoroActionIn(BaseModel):
+    """番茄钟手机端操作。
+
+    `preset` 传内置预设 key（focus / coding / email）或省略——省略时用内容后台
+    为该设备配置好的预设，避免"后台配了 45 分钟，手机点开始却按 25 分钟跑"。
+    """
+
+    preset: str | None = Field(default=None, max_length=40)
+
+
 class DeviceEvent(BaseModel):
     event_type: Literal["button.pressed", "content.confirmed", "content.dismissed", "voice.intent"]
     data: dict[str, Any] = Field(default_factory=dict)

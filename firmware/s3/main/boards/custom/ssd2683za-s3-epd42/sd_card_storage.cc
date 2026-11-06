@@ -237,21 +237,30 @@ struct WiringResult {
     int tried = 0;
 };
 
+// gpio_set_level / gpio_get_level 的形参是 gpio_num_t（强枚举），
+// 这里统一在入口处转换一次，避免每个调用点都写 static_cast。
 int WireXfer(int clk, int mosi, int miso, uint8_t out) {
+    const gpio_num_t g_clk = static_cast<gpio_num_t>(clk);
+    const gpio_num_t g_mosi = static_cast<gpio_num_t>(mosi);
+    const gpio_num_t g_miso = static_cast<gpio_num_t>(miso);
     int in = 0;
     for (int i = 0; i < 8; ++i) {
-        gpio_set_level(mosi, (out >> (7 - i)) & 0x01);
+        gpio_set_level(g_mosi, (out >> (7 - i)) & 0x01);
         SdDelayTicks();
-        gpio_set_level(clk, 1);
+        gpio_set_level(g_clk, 1);
         SdDelayTicks();
-        in = (in << 1) | gpio_get_level(miso);
-        gpio_set_level(clk, 0);
+        in = (in << 1) | gpio_get_level(g_miso);
+        gpio_set_level(g_clk, 0);
         SdDelayTicks();
     }
     return in;
 }
 
 bool WireTryCmd0(int cs, int clk, int mosi, int miso) {
+    const gpio_num_t g_cs = static_cast<gpio_num_t>(cs);
+    const gpio_num_t g_clk = static_cast<gpio_num_t>(clk);
+    const gpio_num_t g_mosi = static_cast<gpio_num_t>(mosi);
+
     gpio_config_t out = {};
     out.pin_bit_mask = (1ULL << cs) | (1ULL << clk) | (1ULL << mosi);
     out.mode = GPIO_MODE_OUTPUT;
@@ -268,15 +277,15 @@ bool WireTryCmd0(int cs, int clk, int mosi, int miso) {
     in.intr_type = GPIO_INTR_DISABLE;
     gpio_config(&in);
 
-    gpio_set_level(cs, 1);
-    gpio_set_level(clk, 0);
-    gpio_set_level(mosi, 1);
+    gpio_set_level(g_cs, 1);
+    gpio_set_level(g_clk, 0);
+    gpio_set_level(g_mosi, 1);
     esp_rom_delay_us(8000);  // 要试 24 种组合，上电等待不能像正式挂载那样给 100ms
 
     for (int i = 0; i < 10; ++i) WireXfer(clk, mosi, miso, 0xFF);  // 80 个上电同步时钟
 
     const uint8_t cmd0[6] = {0x40, 0x00, 0x00, 0x00, 0x00, 0x95};
-    gpio_set_level(cs, 0);
+    gpio_set_level(g_cs, 0);
     SdDelayTicks();
     WireXfer(clk, mosi, miso, 0xFF);
     for (uint8_t b : cmd0) WireXfer(clk, mosi, miso, b);
@@ -285,7 +294,7 @@ bool WireTryCmd0(int cs, int clk, int mosi, int miso) {
         const int v = WireXfer(clk, mosi, miso, 0xFF);
         if ((v & 0x80) == 0) { resp = v; break; }
     }
-    gpio_set_level(cs, 1);
+    gpio_set_level(g_cs, 1);
     WireXfer(clk, mosi, miso, 0xFF);
     return resp == 0x01;
 }

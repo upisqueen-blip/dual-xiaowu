@@ -1,0 +1,42 @@
+From 4f7de86dde5f592af9d490c97f779d69b9db06be Mon Sep 17 00:00:00 2001
+From: upforever <upisqueen@gmail.com>
+Date: Thu, 5 Nov 2026 11:52:41 +0800
+Subject: [PATCH 3/3] feat(refresh): optional minute-granularity refresh
+
+-DREFRESH_MINUTE_ONLY=1 drops the running redraw interval from 1 Hz to 60 s. The layouts have no seconds field, so the extra refreshes only cost battery: a 45 minute focus goes from roughly 2700 partial updates to about 45.
+---
+ platformio.ini |  1 +
+ src/timer.h    | 10 ++++++++--
+ 2 files changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/platformio.ini b/platformio.ini
+index a20d11a..ef06f71 100644
+--- a/platformio.ini
++++ b/platformio.ini
+@@ -39,4 +39,5 @@ build_flags =
+     -DEPD2_DC=8
+     -DEPD2_BUSY=4
+     -DEPD2_RST=-1
++    -DREFRESH_MINUTE_ONLY=1
+ 
+diff --git a/src/timer.h b/src/timer.h
+index 065e74b..bac43e2 100644
+--- a/src/timer.h
++++ b/src/timer.h
+@@ -90,8 +90,14 @@ private:
+     unsigned long lastRedrawTime;
+     unsigned long lastPauseRedrawTime;
+     bool lastPauseState;
+-    static const unsigned long REDRAW_INTERVAL_DEFAULT = 5000;                   // ms
+-    static const unsigned long REDRAW_INTERVAL_FAST = 1000;                      // ms
++    static const unsigned long REDRAW_INTERVAL_DEFAULT = 5000; // ms
++#ifdef REFRESH_MINUTE_ONLY
++    // 屏幕上没有秒位，每秒重画一次只是白耗电池。60s 一次刚好能看到分钟跳变：
++    // 一次 45 分钟的专注从约 2700 次局刷降到 45 次。
++    static const unsigned long REDRAW_INTERVAL_FAST = 60000; // ms
++#else
++    static const unsigned long REDRAW_INTERVAL_FAST = 1000; // ms
++#endif
+     static const unsigned long RUNNING_MESSAGE_REFRESH_INTERVAL = 5 * 60 * 1000; // ms
+     unsigned long redrawInterval = REDRAW_INTERVAL_DEFAULT;
+ 

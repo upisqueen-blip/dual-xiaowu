@@ -62,7 +62,8 @@ public:
                          uint8_t* red_plane,
                          std::string& error,
                          int* server_refresh_minutes = nullptr,
-                         bool* device_unbound_out = nullptr);
+                         bool* device_unbound_out = nullptr,
+                         std::string* pair_code_out = nullptr);
 
     // 拉取双屏控制台配置（GET /api/device/<mac>/dual-config，原始 JSON 存入
     // json_out）。无配置时后端返回 {"config":null}（HTTP 200，仍算成功）。
@@ -79,7 +80,8 @@ public:
                                   const std::string& device_id,
                                   bool active,
                                   bool awake = true,
-                                  std::string* error = nullptr);
+                                  std::string* error = nullptr,
+                                  bool* refresh_required = nullptr);
 
     // 上报 TF 卡存储快照，供后台「本地 TF 卡」面板读取：
     // POST /api/device/<mac>/storage，body 为设备构造的 JSON 快照。

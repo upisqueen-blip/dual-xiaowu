@@ -1160,6 +1160,8 @@ def _render_dual_screen_inner(mac: str, screen: str, w: int, h: int, colors: int
             mode = str(a_cfg.get("mode") or "notes")
             if mode == "published-app":
                 return _render_published_app(a_cfg, w, h, colors, screen="A")
+            if mode == "pomodoro":
+                return _render_pomodoro(mac, a_cfg, w, h, colors, screen="A")
             photos = _album_photos(dual_config)
             if scene_key == "family" and mode.startswith("family"):
                 content = cfg_root.get("content") or {}
@@ -1248,6 +1250,8 @@ def _render_dual_screen_inner(mac: str, screen: str, w: int, h: int, colors: int
         b_mode = str(b_cfg.get("mode") or ("weather" if scene_key == "study" else "family" if scene_key == "family" else "health-plan" if scene_key == "health" else "finance-trend" if scene_key == "finance" else "office"))
         if b_mode == "published-app":
             return _render_published_app(b_cfg, w, h, colors, screen="B")
+        if b_mode == "pomodoro":
+            return _render_pomodoro(mac, b_cfg, w, h, colors, screen="B")
         if b_mode == "album":
             return render_album(mac, w, h, colors, dual_config)
         if scene_key == "family" and b_mode in ("calendar", "family"):
@@ -1430,9 +1434,143 @@ def _render_data_card(payload: dict, w: int, h: int, colors: int) -> Image.Image
             ql.make(fit=True)
             qimg = ql.make_image(fill_color="black", back_color="white").convert("L")
             qimg = qimg.resize((qr_size, qr_size)).point(lambda p: 255 if p > 128 else 0)
-            img.paste(qimg, (w - margin - qr_size, h - margin - qr_size), qimg)
+            # 彩色屏是 P 模式、调色板 index 0 才是黑，直接 paste 灰度图会被
+            # 按索引映射成白色（表现为「给了 qr 却没二维码」）。改成「用灰度图当
+            # 蒙版贴一个黑块」，1 位图与 P 模式都能正确落墨。
+            box = (w - margin - qr_size, h - margin - qr_size,
+                   w - margin, h - margin)
+            img.paste(0, box, qimg)
         except Exception:  # noqa: BLE001
             pass
+    return img
+
+
+def _render_pomodoro(mac: str, cfg: dict, w: int, h: int, colors: int, screen: str = "A") -> Image.Image:
+    """番茄钟双屏出图。
+
+    A 屏（黑白）：阶段 + 超大字号剩余分钟 + 轮次 + 起止时刻。信息量刻意压到最小，
+    因为这张图每分钟才需要变一次数字。
+    B 屏（四色）：今日番茄数 / 累计专注时长 / 当前轮次进度条 + 下一步提示。
+
+    会话状态从 `pomodoro_sessions` 读，剩余时间用 `pomodoro.view()` 现算——
+    设备离线半小时再上线，画出来的仍是此刻正确的剩余时间。
+    """
+    from . import pomodoro as _pm
+
+    scale = w / 400.0
+    is_color = colors >= 3
+    if is_color:
+        img = _palette_p_image(w, h, colors)
+        fg, accent, yellow = 0, 3, 2
+    else:
+        img = Image.new("1", (w, h), 1)
+        fg = accent = yellow = 0
+    draw = ImageDraw.Draw(img)
+    margin = int(16 * scale)
+
+    session = None
+    try:
+        session = store.get_pomodoro_session(mac)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[POMODORO] 读取会话失败 %s: %s", mac, exc)
+    view = _pm.view(session)
+    if session is None:
+        # 没跑过任何会话时，用后台配置的预设兜底展示，避免屏上一片空白
+        preset = _pm.preset_from_config(cfg)
+        view = _pm.view(_pm.stop(mac, preset))
+
+    if screen.upper() == "B":
+        stats = {"focus_count": 0, "focus_seconds": 0}
+        try:
+            stats = store.get_pomodoro_daily(mac, datetime.now().strftime("%Y-%m-%d"))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[POMODORO] 读取统计失败 %s: %s", mac, exc)
+        return _draw_pomodoro_b(draw, img, _pm.screen_b(view, stats), w, h, scale, fg, accent)
+    return _draw_pomodoro_a(draw, img, _pm.screen_a(view), w, h, scale, fg, accent)
+
+
+def _draw_pomodoro_a(draw, img, data: dict, w: int, h: int, scale: float,
+                     fg: int, accent: int) -> Image.Image:
+    """A 屏三条横带：页眉 / 巨型时钟 / 页脚。用 anchor 排版，杜绝压线。"""
+    margin = int(16 * scale)
+    font_kicker = _load_cjk(max(12, int(15 * scale)))
+    font_name = _load_cjk(max(12, int(15 * scale)), bold=True)
+    font_meta = _load_cjk(max(10, int(13 * scale)))
+    font_hint = _load_cjk(max(11, int(15 * scale)), bold=True)
+
+    # 页眉：左侧色条 + 阶段，右侧预设名
+    bar_top, bar_bottom = int(17 * scale), int(41 * scale)
+    draw.rectangle([margin, bar_top, margin + max(2, int(5 * scale)), bar_bottom], fill=accent)
+    draw.text((margin + int(12 * scale), (bar_top + bar_bottom) // 2), data["kicker"],
+              fill=fg, font=font_kicker, anchor="lm")
+    name = _ellipsis_text(draw, data["title"], font_name, int(w * 0.38))
+    draw.text((w - margin, (bar_top + bar_bottom) // 2), name, fill=accent, font=font_name, anchor="rm")
+
+    # 巨型时钟：字号按短边推、再按可用宽度回落，最后用 anchor="mm" 精确居中
+    clock = data["clock"]
+    available = w - 2 * margin
+    size = int(min(w * 0.25, h * 0.34))
+    while size > 20:
+        font_clock = _load_cjk(max(20, size), bold=True)
+        if _text_w(draw, clock, font_clock) <= available:
+            break
+        size -= 4
+    draw.text((w / 2, h * 0.45), clock, fill=fg, font=font_clock, anchor="mm")
+
+    # 分隔线放在时钟下方，不与字形重叠
+    ly = int(h * 0.72)
+    draw.line([(margin, ly), (w - margin, ly)], fill=fg, width=max(1, int(1.5 * scale)))
+
+    # 页脚：轮次在左；未结束时右侧写起止时刻，结束时改为强调色的下一步提示
+    row_y = ly + int(16 * scale)
+    draw.text((margin, row_y), data["cycle"], fill=fg, font=font_meta, anchor="lm")
+    ended = data["kicker"] in ("专注结束", "休息结束")
+    hint = data["hint"]
+    if ended:
+        draw.text((w - margin, row_y), _ellipsis_text(draw, hint, font_hint, int(w * 0.56)),
+                  fill=accent, font=font_hint, anchor="rm")
+    else:
+        draw.text((w - margin, row_y), _ellipsis_text(draw, hint, font_meta, int(w * 0.52)),
+                  fill=fg, font=font_meta, anchor="rm")
+    return img
+
+
+def _draw_pomodoro_b(draw, img, data: dict, w: int, h: int, scale: float,
+                     fg: int, accent: int) -> Image.Image:
+    """B 屏四条横带：标题 / 两个大数字 / 进度条 / 下一步。全部按带宽排，不叠字。"""
+    margin = int(16 * scale)
+    font_title = _load_cjk(max(15, int(21 * scale)), bold=True)
+    font_big = _load_cjk(max(18, int(31 * scale)), bold=True)
+    font_meta = _load_cjk(max(10, int(13 * scale)))
+    font_hint = _load_cjk(max(11, int(15 * scale)), bold=True)
+
+    # 带 1：标题 + 阶段
+    draw.text((margin, int(16 * scale)), data["title"], fill=fg, font=font_title, anchor="lm")
+    draw.text((w - margin, int(16 * scale)), data.get("footer") or "", fill=accent,
+              font=font_meta, anchor="rm")
+    draw.line([(margin, int(32 * scale)), (w - margin, int(32 * scale))], fill=fg, width=max(1, int(1.5 * scale)))
+
+    # 带 2：番茄数（强调色）/ 累计时长，共用一条基线
+    big_baseline = int(h * 0.30)
+    count = _ellipsis_text(draw, data["count_text"], font_big, int(w * 0.46))
+    draw.text((margin, big_baseline), count, fill=accent, font=font_big, anchor="lm")
+    draw.text((w - margin, big_baseline), _ellipsis_text(draw, data["time_text"], font_big, int(w * 0.42)),
+              fill=fg, font=font_big, anchor="rm")
+
+    # 带 3：轮次进度条 + 标签
+    bar_y = int(h * 0.53)
+    bar_h = max(6, int(10 * scale))
+    draw.rectangle([margin, bar_y, w - margin, bar_y + bar_h], outline=fg, width=max(1, int(1.5 * scale)))
+    fill_w = int((w - 2 * margin) * max(0, min(100, int(data["progress"]))) / 100)
+    if fill_w > 0:
+        draw.rectangle([margin, bar_y, margin + fill_w, bar_y + bar_h], fill=accent)
+    draw.text((margin, bar_y + bar_h + int(12 * scale)), data["bar_text"], fill=fg, font=font_meta, anchor="lm")
+
+    # 带 4：下一步
+    sep_y = int(h * 0.74)
+    draw.line([(margin, sep_y), (w - margin, sep_y)], fill=fg, width=1)
+    draw.text((margin, sep_y + int(18 * scale)), _ellipsis_text(draw, data["next"], font_hint, w - 2 * margin),
+              fill=fg, font=font_hint, anchor="lm")
     return img
 
 

@@ -7,12 +7,12 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Response, status
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 
-from . import data_api, isv_spec, sandbox
+from . import data_api, isv_spec, pomodoro, sandbox
 from .models import (AdminLogin, ContentConfigIn, ContentPush, DeveloperAppCreate, DeveloperLogin,
                      DataSourceIn, DeveloperRegister, DeviceCapabilities, DeviceEvent, DeviceRegister,
                      GithubImportIn, Heartbeat, MobileContentPush, ModelConfigUpsert, PairingConfirmIn,
-                     PairingStartIn, PasswordLogin, ReviewDecision, ReviewSubmit, SandboxAppCreate, TaskAck,
-                     TemplateUpsert, WebhookCreate)
+                     PairingStartIn, PasswordLogin, PomodoroActionIn, ReviewDecision, ReviewSubmit,
+                     SandboxAppCreate, TaskAck, TemplateUpsert, WebhookCreate)
 from .connector_api import router as connector_router
 from .connectors import ConnectorRegistry, CredentialVault
 from .plugin_runtime import PluginRegistry
@@ -698,6 +698,90 @@ def mobile_revoke_grant(grant_id: str, user_id: str = Depends(current_user)) -> 
         raise HTTPException(status.HTTP_404_NOT_FOUND, "grant not found")
     store.audit(user_id, "grant.revoke", grant_id, {})
     return Response(status_code=204)
+
+
+# ── 番茄钟：手机端控制 ─────────────────────────────────────────
+# 屏上怎么画由 render.py 决定，这里只管「状态推进」。所有接口都要用户会话，
+# 且设备必须绑在该用户名下——番茄钟是私人节奏，不接受跨账号操作。
+POMODORO_ACTIONS = ("start", "pause", "resume", "skip", "stop")
+
+
+def _pomodoro_preset_for(device_id: str, override: str | None = None) -> pomodoro.Preset:
+    """取这台设备该用的预设：显式传入 > 内容后台为它配的预设 > 内置默认。"""
+    if override:
+        return pomodoro.resolve_preset(override)
+    cfg = store.get_content_config(device_id) or {}
+    payload = cfg.get("config") or {}
+    scene_key = str(payload.get("sceneKey") or "office")
+    scene = (payload.get("config") or {}).get(scene_key) or {}
+    return pomodoro.preset_from_config(scene.get("a") or scene.get("b") or {})
+
+
+def _pomodoro_payload(device_id: str) -> dict:
+    """统一的返回结构：当前视图 + 原始会话 + 可用预设。"""
+    session = store.get_pomodoro_session(device_id)
+    view = pomodoro.view(session)
+    today = pomodoro.now_utc().astimezone().strftime("%Y-%m-%d")
+    return {
+        "device_id": device_id,
+        "state": view,
+        "session": {k: v for k, v in (session or {}).items() if k != "device_id"},
+        "stats": store.get_pomodoro_daily(device_id, today),
+        "screen_a": pomodoro.screen_a(view),
+        "screen_b": pomodoro.screen_b(view, store.get_pomodoro_daily(device_id, today)),
+        "presets": pomodoro.preset_public(),
+    }
+
+
+@app.get("/api/v1/pomodoro/presets")
+def pomodoro_presets() -> list[dict]:
+    return pomodoro.preset_public()
+
+
+@app.get("/api/v1/mobile/pomodoro/{device_id}")
+def mobile_pomodoro_state(device_id: str, user_id: str = Depends(current_user)) -> dict:
+    if not store.user_owns(user_id, device_id):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "device is not bound to this user")
+    return _pomodoro_payload(device_id)
+
+
+@app.post("/api/v1/mobile/pomodoro/{device_id}/{action}")
+def mobile_pomodoro_action(device_id: str, action: str,
+                           body: PomodoroActionIn | None = None,
+                           user_id: str = Depends(current_user)) -> dict:
+    if action not in POMODORO_ACTIONS:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"unknown action, expected one of {POMODORO_ACTIONS}")
+    if not store.user_owns(user_id, device_id):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "device is not bound to this user")
+
+    now = pomodoro.now_utc()
+    session = store.get_pomodoro_session(device_id)
+    preset = _pomodoro_preset_for(device_id, body.preset if body else None)
+
+    if action == "start":
+        session = pomodoro.new_session(device_id, preset, now)
+    elif action == "stop":
+        session = pomodoro.stop(device_id, preset, now)
+    elif session is None:
+        # 没跑过就别硬推进，直接把预设摆出来让用户点开始
+        session = pomodoro.stop(device_id, preset, now)
+    elif action == "pause":
+        session = pomodoro.pause(session, now)
+    elif action == "resume":
+        session = pomodoro.resume(session, now)
+    elif action == "skip":
+        # 只有真正跑满的专注回合才算一个番茄；中途跳过不计数，避免统计注水
+        before = pomodoro.view(session, now)
+        if session.get("phase") == pomodoro.FOCUS and before["over"]:
+            store.bump_pomodoro_daily(device_id, now.astimezone().strftime("%Y-%m-%d"),
+                                      int(session.get("duration_s") or 0))
+        session = pomodoro.advance(session, now, skipped=True)
+
+    store.save_pomodoro_session(session)
+    store.set_pending_refresh(device_id, True)
+    store.audit(user_id, f"pomodoro.{action}", device_id,
+                {"phase": session.get("phase"), "preset": session.get("preset_key")})
+    return _pomodoro_payload(device_id)
 
 
 @app.post("/api/v1/mobile/devices/{device_id}/content", status_code=202)

@@ -37,11 +37,11 @@ OUT_H = os.path.join(FW_DIR, "provisioning_png.h")
 BLACK, WHITE = 0, 255
 
 STEPS = [
-    ("1", "手机 WiFi 选 Xiaowu- 热点"),
-    ("2", "浏览器打开 192.168.4.1"),
-    ("3", "选家里 WiFi 并输密码"),
-    ("4", "屏幕显示 6 位激活码"),
-    ("5", "xiaozhi.me 输入激活码"),
+    ("1", "浏览器打开 192.168.4.1"),
+    ("2", "选择家里 WiFi 并输入密码"),
+    ("3", "联网后获取小悟后台配对码"),
+    ("4", "dualcn.xiaowuai.vip 输入配对码"),
+    ("5", "xiaozhi.me 输入小智激活码"),
 ]
 
 
@@ -57,9 +57,15 @@ def main():
 
     # 2) 步骤列表
     num_font = ImageFont.truetype(SIMHEI, 15)
-    body_font = ImageFont.truetype(MSYH, 18)
-    y = 64
-    line_h = 36
+    body_font = ImageFont.truetype(MSYH, 16)
+    # Actual SSID is overlaid by LVGL at runtime; keep a high-contrast label
+    # zone here so the same page works on both displays while offline.
+    d.rounded_rectangle([45, 51, 355, 80], radius=4, fill=BLACK)
+    ssid_hint_font = ImageFont.truetype(SIMHEI, 15)
+    d.text((W // 2, 65), "手机连接下方 Xiaowu 热点", font=ssid_hint_font,
+           fill=WHITE, anchor="mm")
+    y = 88
+    line_h = 32
     for num, text in STEPS:
         box = 20
         d.rectangle([14, y, 14 + box, y + box], fill=BLACK)
@@ -71,7 +77,7 @@ def main():
 
     # 3) 底部药丸：配网成功后自动继续
     pill_font = ImageFont.truetype(SIMHEI, 15)
-    pill_text = "配网成功后自动继续，无需按键"
+    pill_text = "离线没有有效码 · 联网后自动获取两组码"
     tb = d.textbbox((0, 0), pill_text, font=pill_font)
     tw = tb[2] - tb[0]
     pad_x, pad_y = 16, 8

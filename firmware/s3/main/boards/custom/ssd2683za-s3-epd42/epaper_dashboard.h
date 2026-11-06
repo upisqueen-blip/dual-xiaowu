@@ -110,7 +110,8 @@ public:
     void SetInkSightShow(InkSightShowFn fn) { inksight_show_ = std::move(fn); }
     void SetInkSightFooter(std::string footer);
     void SetSpeakingStatus(std::string status);
-    void ShowActivation(std::string message, std::string code);
+    void ShowActivation(std::string message, std::string xiaozhi_code,
+                        std::string xiaowu_pair_code = {});
     void HideActivation();
     // 未配网时的整屏配网指引页：热点名 + 配网地址 + 后续激活码引导。
     // 用独立页面而不是 Alert 提示框，因为墨水屏上 Alert 只画一小条覆盖层，
@@ -130,6 +131,7 @@ private:
     lv_obj_t* body_ = nullptr;
     lv_obj_t* footer_ = nullptr;
     lv_obj_t* activation_code_label_ = nullptr;
+    lv_obj_t* xiaowu_pair_code_label_ = nullptr;
     lv_obj_t* status_bar_ = nullptr;   // 顶部状态栏容器（WiFi 信号 + 电量/USB）
     lv_obj_t* status_label_ = nullptr;  // 状态栏右侧文字
     lv_obj_t* status_line_ = nullptr;   // 状态栏下方分割线
@@ -155,8 +157,10 @@ private:
     size_t book_page_ = 0;
     lv_obj_t* book_image_ = nullptr;
     lv_obj_t* welcome_image_ = nullptr;
+    lv_obj_t* provisioning_ssid_label_ = nullptr;
     std::unique_ptr<LvglImage> book_image_data_;
     std::unique_ptr<LvglImage> welcome_image_data_;
+    std::unique_ptr<LvglImage> guide_image_data_;
     std::unique_ptr<LvglImage> provisioning_image_data_;
     std::string loaded_book_image_;
     std::function<std::unique_ptr<LvglImage>(const std::string&)>
@@ -174,6 +178,7 @@ private:
     std::string speaking_status_;
     std::string activation_message_;
     std::string activation_code_;
+    std::string xiaowu_pair_code_;
     std::string provisioning_ssid_;
     std::string provisioning_url_;
 
@@ -181,6 +186,7 @@ private:
     void Render();
     void EnsureBookImageLoaded(const std::string& name);
     void EnsureWelcomeImageLoaded();
+    void EnsureGuideImageLoaded();
     void EnsureProvisioningImageLoaded();
     std::string RenderHome() const;
     std::string RenderSpeaking() const;

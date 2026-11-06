@@ -78,6 +78,7 @@ const config = {
       { source: "/", headers: noStore },
       { source: "/center", headers: noStore },
       { source: "/api-docs", headers: noStore },
+      { source: "/try", headers: noStore },
     ];
   },
 };

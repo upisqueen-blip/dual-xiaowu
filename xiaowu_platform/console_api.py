@@ -1275,7 +1275,8 @@ def device_runtime(mac: str, body: dict[str, Any] = {}, x_device_token: Annotate
     mode = (body.get("mode") or "interval")
     awake = bool(body.get("awake"))
     store.report_runtime(mac, mode, awake)
-    return {"ok": True}
+    refresh_required = store.consume_pending_refresh(mac)
+    return {"ok": True, "refresh_required": refresh_required}
 
 
 @router.post("/api/device/{mac}/storage")

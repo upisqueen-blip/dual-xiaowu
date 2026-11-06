@@ -13,13 +13,17 @@
 - 未绑定：返回带配对码的引导图，并置 X-Device-Unbound: 1
 - 未注册（无 MAC）：返回重新配网引导图，并置 X-Device-Unregistered: no-mac
 """
+import base64
+import json
 from datetime import UTC, datetime
 from typing import Annotated, Optional
 
-from fastapi import APIRouter, Header, Query, Response
+from fastapi import APIRouter, Body, Header, Query, Response
 from fastapi.responses import JSONResponse
 
+from .data_api import validate_card
 from .render import (
+    _render_data_card,
     image_to_bmp_bytes,
     image_to_png_bytes,
     image_to_raw_2bpp,
@@ -42,6 +46,63 @@ def _pack_raw(img, colors: int, bpp: int) -> bytes:
     if bpp >= 4 and colors >= 6:
         return image_to_raw_4bpp(img)
     return image_to_raw_2bpp(img)
+
+
+@router.post("/api/try/render")
+def try_render(
+    payload: dict = Body(default_factory=dict),
+    w: int = Query(default=400, ge=200, le=800),
+    h: int = Query(default=300, ge=150, le=600),
+):
+    """零注册试出图：贴一段契约 JSON，直接返回 A / B 双屏的真实渲染 PNG。
+
+    这是给「还没决定要不要接入的人」准备的漏斗口：不注册、不发 token、不涉及任何
+    设备，只跑一次纯函数渲染。校验结论和出图一起返回，看到的效果与设备一致
+    （同一套 `_render_data_card`，不是前端画的示意图）。
+
+    有意不做的两件事：不接受 URL（避免变成任何人可用的 SSRF 跳板），
+    也不读设备配置（不泄漏别人的数据）。
+    """
+    # 契约本身很小（标题 + 最多 6 项），超过这个量级只可能是有人在灌请求体。
+    # 这是软防线：真正的大包在网关层掐，这里只挡明显异常的调用。
+    if len(json.dumps(payload, ensure_ascii=False)) > 20000:
+        return JSONResponse({"verdict": "fail", "error": "内容过长：请只保留屏上要显示的文字"},
+                            status_code=413)
+    report = validate_card(payload)
+    norm = report["normalized"]
+    try:
+        img_a = _render_data_card(norm, w, h, 2)
+        img_b = _render_data_card(norm, w, h, 4)
+        images = {
+            "a": "data:image/png;base64," + base64.b64encode(image_to_png_bytes(img_a)).decode(),
+            "b": "data:image/png;base64," + base64.b64encode(image_to_png_bytes(img_b)).decode(),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(
+            {"verdict": "fail", "error": f"渲染失败：{exc}", "checks": report["checks"]},
+            status_code=422,
+        )
+    return JSONResponse({
+        "verdict": report["verdict"],
+        "summary": report["summary"],
+        "checks": report["checks"],
+        "normalized": norm,
+        "images": images,
+        "note": "A 屏黑白局部刷新（高频），B 屏三色/四色全刷（低频）；同一份数据两屏共用。",
+    })
+
+
+@router.get("/api/public/apps")
+def public_apps() -> JSONResponse:
+    """公开作品列表：只暴露上架必需字段，不带 developer_id / 审核备注。
+
+    给「作品墙」用 —— 让还没接入的人先看到别人已经在真机上跑什么，
+    比讲十句平台能力有用。
+    """
+    rows = store.list_published_apps(enabled_only=True)
+    keep = ("app_id", "name", "description", "scene", "preview_url", "entry", "published_at")
+    apps = [{k: row.get(k) for k in keep} for row in rows]
+    return JSONResponse({"count": len(apps), "apps": apps})
 
 
 @router.get("/api/render")
@@ -237,6 +298,9 @@ def preview(
     # 即时预览覆盖：按所选模式直接出图（不依赖已保存的设备配置）
     if aMode or bMode or sceneKey:
         sk = (sceneKey or "finance").strip() or "finance"
+        # 用真实 mac 而非 "DEMO"：番茄钟等「按设备状态出图」的模式要读到该设备的会话，
+        # 否则后台切到 pomodoro 只会看到一张「未开始」的空卡。
+        mac_code = (mac or "DEMO").strip().upper()
         override_cfg = {
             "version": 1,
             "sceneKey": sk,
@@ -250,9 +314,9 @@ def preview(
         }
         try:
             if screen == "B":
-                img = render_dual_screen("DEMO", "B", w, h, colors, override_cfg)
+                img = render_dual_screen(mac_code, "B", w, h, colors, override_cfg)
             else:
-                img = render_dual_screen("DEMO", "A", w, h, 2, override_cfg)
+                img = render_dual_screen(mac_code, "A", w, h, 2, override_cfg)
         except Exception:  # noqa: BLE001
             img = render_error("DEMO", w, h)
         return Response(content=image_to_png_bytes(img), media_type="image/png",

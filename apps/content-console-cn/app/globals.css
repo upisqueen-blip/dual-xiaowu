@@ -407,3 +407,74 @@ label.mini select{width:auto;min-width:96px}
 .pair-revoked{font-size:10px;color:var(--muted)}
 .pair-empty{font-size:11px;margin:0}
 @media(max-width:640px){.pair-devices{grid-template-columns:1fr}.pair-form{flex-direction:column;align-items:stretch}.pair-request-head{flex-wrap:wrap}.pair-status{margin-left:0}}
+
+/* 番茄钟参数（双屏配置 · mode=pomodoro） */
+.pomo-config{margin-top:10px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#fbfcf8}
+.pomo-chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+.pomo-chip{border:1px solid var(--line);background:#fff;border-radius:999px;padding:4px 11px;font-size:12px;color:#4f5b52;cursor:pointer}
+.pomo-chip.on{background:var(--green);border-color:var(--green);color:#fff}
+.pomo-config .field-row{margin-top:6px}
+.pomo-config .tt-hint{margin:8px 0 0;font-size:12px;line-height:1.55;color:#6b766e}
+
+/* 未登录：侧栏被收起菜单的提示（点击直接开登录弹窗） */
+.sidebar nav button.nav-note{color:#6f7d75;align-items:flex-start;gap:9px;padding:9px 12px;font-size:11.5px;line-height:1.5}
+.sidebar nav button.nav-note:hover{background:#223129;color:#aeb9b2}
+.sidebar nav button.nav-note svg{flex:none;margin-top:2px}
+@media(max-width:760px){.sidebar nav button.nav-note{justify-content:center;padding:9px}.sidebar nav button.nav-note span{display:none}}
+
+/* ===== 侧栏：导航可滚动 + 账号区常驻 =====
+   项目变多后（11 项 + 开发者中心 + 两块屏说明）侧栏内容会超过 100vh。
+   原来 .sidebar 没设滚动、.sidebar-foot 用 margin-top:auto 顶到底，
+   结果整块被挤到可视区之外，「退出登录」在店里看不到了。
+   这里把导航设为唯一滚动容器，底部账号区固定可见。 */
+.sidebar{overflow:hidden}
+.sidebar nav{flex:1 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;scrollbar-width:thin;scrollbar-color:#33443b transparent}
+.sidebar nav::-webkit-scrollbar{width:5px}
+.sidebar nav::-webkit-scrollbar-thumb{background:#33443b;border-radius:3px}
+.sidebar nav::-webkit-scrollbar-thumb:hover{background:#43584c}
+.sidebar-foot{flex:none}
+
+/* 退出按钮：原来只有一枚图标，颜色 #89958e 压在深底上，很容易被当成装饰 */
+.profile .profile-exit{display:flex;align-items:center;gap:4px;background:none;border:0;color:#89958e;padding:5px 7px;border-radius:7px;cursor:pointer}
+.profile .profile-exit:hover{background:#223129;color:#fff}
+.profile .profile-exit span{display:inline;font-size:11px;margin:0;color:inherit}
+
+@media(max-width:760px){
+  /* 原来整块 .sidebar-foot 被 display:none，手机端登录/退出一个入口都没有 */
+  .sidebar nav{flex:none;overflow:visible}
+  .sidebar-foot{display:block}
+  .sidebar-foot .hardware-map{display:none}
+  .profile{margin-top:12px;padding:10px 4px 0}
+}
+
+/* 矮屏（笔记本 768/900 高、以及缩放后的浏览器）：侧栏整体收紧，
+   目标是在 600px 上下高度里 11 项 + 提示 + 开发者中心 + 两块屏说明 + 账号区
+   全部可见，不触发滚动。滚动只是兜底，不该是常态。 */
+@media(max-height:820px){
+  .sidebar{padding:18px 14px 14px}
+  .brand{padding:0 6px 16px}
+  .brand strong{font-size:14.4px}
+  .sidebar nav{gap:2px}
+  .sidebar nav button,.sidebar nav .developer-link{padding:7px 11px}
+  .nav-label{margin:6px 0 4px}
+  .hardware-map{padding:8px 6px 0;margin-top:6px}
+  .hardware-map small{font-size:10px}
+  .profile{margin-top:10px;padding:9px 6px 0}
+}
+@media(max-height:660px){
+  .brand{padding-bottom:10px}
+  .sidebar nav{gap:0}
+  .sidebar nav button,.sidebar nav .developer-link{padding:6px 10px}
+  .hardware-map{padding-top:6px}
+}
+
+/* 608px 上下（笔记本 + 浏览器书签栏）再收一层：两块屏的说明文字只留标签，
+   账号区上边距收紧，让 11 项菜单 + 开发者中心刚好放得下，不出现导航滚动。 */
+@media(max-height:700px){
+  .brand{padding-bottom:9px}
+  .hardware-map{padding-top:6px;margin-top:5px}
+  .hardware-map small{display:none}
+  .hardware-map span{font-size:10.5px}
+  .profile{margin-top:6px;padding-top:7px}
+  .nav-label{margin:4px 0 2px}
+}

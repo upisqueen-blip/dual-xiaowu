@@ -16,6 +16,7 @@
 #include "codecs/no_audio_codec.h"
 #endif
 #include "config.h"
+#include "epd583_bringup.h"
 #include "inksight_client.h"
 #include "epaper_todo_web.h"
 #include "lightacade_client.h"
@@ -26,6 +27,7 @@
 #if EPD_ENABLE_COLOR_SCREEN
 #include "ssd2683za_color_panel.h"
 #include "uc1679_display.h"
+#include "welcome_bwr.h"   // B 屏内置欢迎页（1bpp bw/red 两平面，离线可用）
 #endif
 #include "wifi_board.h"
 #include "lvgl_image.h"
@@ -107,6 +109,14 @@ private:
     uint8_t* color_frame_ = nullptr;  // 4-color 驱动用的 2bpp 帧（SSD2683ZA BWRY）
     TaskHandle_t color_refresh_task_ = nullptr;
     std::atomic<bool> inksight_device_unbound_{false};
+    // 首次进入未绑定流程后，B 屏欢迎页保持不变；绑定码与激活码都显示在 A 屏。
+    std::atomic<bool> preserve_pairing_welcome_{false};
+    // B 屏欢迎页（固件内置一张 BWR 图）是否已送显。三色屏每次全刷约 16 秒，
+    // 因此只在「还没内容可显示」时刷一次，之后由真实内容覆盖。
+    std::atomic<bool> color_welcome_shown_{false};
+    // B 屏当前是否已显示真实内容（后端下发的便签/课程表）。有内容后就不再
+    // 用欢迎页去覆盖它。
+    std::atomic<bool> color_content_shown_{false};
     // 双屏后台模式：dual-config（课程表/便签）存在时，定时刷新改为拉取
     // DUAL_A（A 屏便签）/ DUAL_B（B 屏课程表），代替 InkSight persona。
     std::atomic<bool> dual_mode_{false};
@@ -292,10 +302,18 @@ private:
                          : PowerMode::kActive);
     }
 
-    void InitializeColorScreenAfterNetwork() {
-        if (color_screen_ != nullptr) return;
-        // The color panel shares DC/RST with the SSD1619. Keep it completely
-        // untouched during provisioning so the fast panel can show the prompt.
+    // start_refresh_task=false：只把屏点起来（用于开机刷本地欢迎页），不启动
+    // 60 s 周期的拉取任务。配网阶段没有网络，起了任务只会每秒空转报错，还会
+    // 走「首刷失败 → ShowBootHome」把 A 屏的配网指引顶掉。
+    void InitializeColorScreenAfterNetwork(bool start_refresh_task = true) {
+        if (color_screen_ != nullptr) {
+            // 开机欢迎页阶段已把屏点起来（start_refresh_task=false）。联网后
+            // 必须补上拉取任务，否则 B 屏永远停在欢迎页。
+            if (start_refresh_task) EnsureColorRefreshTask();
+            return;
+        }
+        // The color panel shares DC/RST with the SSD1619. Keep it untouched
+        // while provisioning so the fast A panel can show its local guide.
         // FPC2 上电初始化偶发失败：BUSY 引脚上电瞬态/电源未稳，会让极性被误判
         // 或面板复位后迟迟不释放 BUSY（同一次上电首次激活却曾成功）。复位稳定后
         // 多试几次即可恢复，避免彩色屏整段不可用。
@@ -322,16 +340,16 @@ private:
             ESP_LOGW(kTag, "FPC2 color panel initialization failed; keeping FPC1 active");
             // FPC2 挂了也必须起刷新任务：双屏模式下 RefreshDualScreens 会懒探测
             // FPC2（见下方 B 屏分支），单屏/未绑定则降级显示在 FPC1。
-            if (color_refresh_task_ == nullptr &&
-                xTaskCreate(ColorRefreshTask, "color_refresh", 8192, this, 3,
-                            &color_refresh_task_) != pdPASS) {
-                ESP_LOGW(kTag, "Cannot create color refresh task");
-            }
+            if (start_refresh_task) EnsureColorRefreshTask();
             return;
         }
         color_screen_ = candidate;
-        if (color_refresh_task_ == nullptr &&
-            xTaskCreate(ColorRefreshTask, "color_refresh", 8192, this, 3,
+        if (start_refresh_task) EnsureColorRefreshTask();
+    }
+
+    void EnsureColorRefreshTask() {
+        if (color_refresh_task_ != nullptr) return;
+        if (xTaskCreate(ColorRefreshTask, "color_refresh", 8192, this, 3,
                         &color_refresh_task_) != pdPASS) {
             ESP_LOGW(kTag, "Cannot create color refresh task");
         }
@@ -350,6 +368,47 @@ private:
         return color_screen_->ShowFrame(color_frame_);
 #endif
     }
+
+    // 兜底欢迎页：未联网 / 未绑定 / 后台没配内容 / 连不上服务器时，B 屏显示
+    // 固件内置的 BWR 欢迎页（welcome_bwr.h）。纯本地资源，不经过网络、也不占
+    // PSRAM（数组是 flash 常量），所以配网阶段就能显示。
+    // 三色屏一次全刷约 16 秒，故只刷一次；真实内容上屏后由 color_content_shown_
+    // 拦住，不会被欢迎页覆盖回去。
+    void ShowColorWelcomeIfNeeded(const char* reason) {
+#if FPC2_COLOR_COUNT == 3
+        if (color_content_shown_.load()) return;
+        if (color_welcome_shown_.exchange(true)) return;
+        if (color_screen_ == nullptr) {
+            InitializeColorScreenAfterNetwork(/*start_refresh_task=*/false);
+        }
+        if (color_screen_ == nullptr || !color_screen_->Available()) {
+            // 面板未就绪（FPC 没插好 / 初始化失败）：清标志，下次再试。
+            color_welcome_shown_.store(false);
+            ESP_LOGW(kTag, "B 屏欢迎页待显示（%s）：彩屏未就绪", reason);
+            return;
+        }
+        if (Uc1679Display::kWidth != kWelcomeBwrWidth ||
+            Uc1679Display::kHeight != kWelcomeBwrHeight) {
+            ESP_LOGW(kTag,
+                     "B 屏欢迎页尺寸不匹配（面板 %dx%d / 资源 %dx%d），跳过",
+                     Uc1679Display::kWidth, Uc1679Display::kHeight,
+                     kWelcomeBwrWidth, kWelcomeBwrHeight);
+            return;
+        }
+        const bool ok = ShowColorFrame(welcome_bwr_bw, welcome_bwr_red);
+        ESP_LOGI(kTag, "B 屏显示内置欢迎页（%s）：%s", reason,
+                 ok ? "成功" : "失败，稍后重试");
+        if (!ok) color_welcome_shown_.store(false);
+#else
+        (void)reason;
+#endif
+    }
+
+#endif
+
+#if !EPD_ENABLE_COLOR_SCREEN
+    // 关掉彩屏时保留同名空实现，让各处兜底调用点不必再套条件编译。
+    void ShowColorWelcomeIfNeeded(const char* reason) { (void)reason; }
 #endif
 
     // InkSight 今日看板：帧缓冲放在 PSRAM，15KB；busy_ 防重复刷新。
@@ -591,6 +650,7 @@ private:
         // 配对码帧；连续失败时保持上一次判定，避免误清。
         bool device_unbound = inksight_device_unbound_.load();
         bool any_ok = false;
+        std::string pair_code;
 
         // A 屏：便签（1bpp BMP → SSD1619）
         if (inksight_frame_ == nullptr) {
@@ -607,11 +667,19 @@ private:
                                      SystemInfo::GetMacAddress(),
                                      inksight_frame_, error,
                                      nullptr /* server_refresh_minutes */,
-                                     battery_pct, &device_unbound)) {
+                                     battery_pct, &device_unbound, &pair_code)) {
                 any_ok = true;
-                display_->RawFrameRefresh(inksight_frame_,
-                                          false /* partial 快刷 */);
-                ESP_LOGI(kTag, "双屏 A（便签）已刷新");
+                if (device_unbound) {
+                    preserve_pairing_welcome_.store(true);
+                    display_->SetXiaowuPairCode(pair_code.c_str());
+                    ESP_LOGI(kTag, "设备未绑定：已取得小悟后台设备绑定码 %s",
+                             pair_code.empty() ? "(未返回)" : pair_code.c_str());
+                    ShowColorWelcomeIfNeeded("设备未绑定(双屏)");
+                } else if (!preserve_pairing_welcome_.load()) {
+                    display_->RawFrameRefresh(inksight_frame_,
+                                              false /* partial 快刷 */);
+                    ESP_LOGI(kTag, "双屏 A（便签）已刷新");
+                }
             } else {
                 ESP_LOGW(kTag, "双屏 A 拉取失败: %s", error.c_str());
             }
@@ -623,7 +691,8 @@ private:
         if (color_screen_ == nullptr) {
             InitializeColorScreenAfterNetwork();
         }
-        if (color_screen_ != nullptr && color_screen_->Available()) {
+        if (!device_unbound && !preserve_pairing_welcome_.load() &&
+            color_screen_ != nullptr && color_screen_->Available()) {
             if (color_bw_ == nullptr) {
                 color_bw_ = static_cast<uint8_t*>(heap_caps_malloc(
                     Ssd2683zaColorPanel::kWidth / 8 * Ssd2683zaColorPanel::kHeight,
@@ -659,6 +728,7 @@ private:
                         writable.SetInt("clr_ref_min", server_refresh_minutes);
                     }
                     if (ShowColorFrame(color_bw_, color_red_)) {
+                        color_content_shown_.store(true);
                         ESP_LOGI(kTag, "双屏 B（课程表）已刷新");
                     } else {
                         ESP_LOGW(kTag, "双屏 B 刷屏失败");
@@ -729,6 +799,8 @@ private:
         SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
         std::string error;
         bool ok = false;
+        bool device_unbound = false;
+        std::string pair_code;
         for (int attempt = 1; attempt <= 3 && !ok; ++attempt) {
             if (inksight_cancel_.load()) {
                 ESP_LOGI(kTag, "XiaowuAI color refresh cancelled by user");
@@ -741,11 +813,10 @@ private:
                 display_->dashboard().SetInkSightFooter("重试中…");
             }
             int server_refresh_minutes = 0;
-            bool device_unbound = false;
             ok = InkSightClient::Load2bpp(
                 GetNetwork(), inksight_server_, persona,
                 SystemInfo::GetMacAddress(), color_bw_, color_red_, error,
-                &server_refresh_minutes, &device_unbound);
+                &server_refresh_minutes, &device_unbound, &pair_code);
             if (ok) inksight_device_unbound_.store(device_unbound);
             if (server_refresh_minutes > 0) {
                 Settings writable("inksight", true);
@@ -761,6 +832,19 @@ private:
                                   ? friendly
                                   : "连不上服务器(" + friendly + ")";
             display_->dashboard().SetInkSightFooter(tip + " OK再试 · 长按返回");
+            ShowColorWelcomeIfNeeded("B 屏连不上服务器");
+            cleanup();
+            return;
+        }
+        if (device_unbound) {
+            preserve_pairing_welcome_.store(true);
+            display_->SetXiaowuPairCode(pair_code.c_str());
+            display_->dashboard().SetInkSightFooter(
+                pair_code.empty() ? "小悟设备绑定码暂未返回，稍后重试"
+                                  : "两组绑定码显示在 A 屏；B 屏保留欢迎页");
+            ESP_LOGI(kTag, "设备未绑定：已取得小悟后台设备绑定码 %s",
+                     pair_code.empty() ? "(未返回)" : pair_code.c_str());
+            ShowColorWelcomeIfNeeded("设备未绑定");
             cleanup();
             return;
         }
@@ -768,7 +852,12 @@ private:
             inksight_device_unbound_.load()
                 ? "InkSight 未绑定：配对码已显示在 FPC2"
                 : "正在刷彩屏，请稍候…");
+        if (preserve_pairing_welcome_.load()) {
+            cleanup();
+            return;
+        }
         const bool refreshed = ShowColorFrame(color_bw_, color_red_);
+        if (refreshed) color_content_shown_.store(true);
         if (inksight_device_unbound_.load()) {
             display_->dashboard().SetInkSightFooter(
                 refreshed ? "InkSight 未绑定：配对码在 FPC2"
@@ -846,6 +935,7 @@ private:
 
         if (ok) {
             const bool refreshed = ShowColorFrame(color_bw_, color_red_);
+            if (refreshed) color_content_shown_.store(true);
             if (!refreshed) error = "FPC2 刷新失败";
         }
         display_->dashboard().SetInkSightFooter(
@@ -863,6 +953,29 @@ private:
     // 后端渲染等待（10~40s）+ 彩屏全刷 BUSY 等待（20~45s），若占用主循环，
     // 语音唤醒等事件会被顺延几十秒——表现为「呼叫小悟没反应」。面板总线的
     // 并发安全由 EpaperBusGuard（epaper_bus_lock.h）保证。
+    // 开机把内置欢迎页刷到 B 屏（三色）。这条路径**不看网络状态**：刚烧录 /
+    // 首次上电 / 配网中 都能看到品牌页，不会留一整块白玻璃。
+    // 延时是必要的：A 屏首屏（引导页）要先跑完自己的全刷，两屏共享 RST，
+    // 抢在它中间复位会把 A 屏那一帧打断。
+    static void ColorWelcomeTask(void* argument) {
+        auto* self = static_cast<Ssd2683zaS3Board*>(argument);
+        // 先让开 A 屏首刷（两屏共享 RST，抢在中间复位会打断 A 那一帧）。
+        vTaskDelay(pdMS_TO_TICKS(10000));
+        // 已联网的设备通常半分钟内就能拿到后台内容。这段时间里先不抢着刷
+        // 欢迎页，否则会「欢迎页 16 s + 内容 16 s」白闪两轮。
+        // 未联网 / 未绑定 / 后台没配内容时，兜底显示本地欢迎页。
+        for (int i = 0; i < 5; ++i) {
+            if (self->color_content_shown_.load() ||
+                self->color_welcome_shown_.load()) {
+                vTaskDelete(nullptr);
+                return;
+            }
+            vTaskDelay(pdMS_TO_TICKS(3000));
+        }
+        self->ShowColorWelcomeIfNeeded("开机本地欢迎页");
+        vTaskDelete(nullptr);
+    }
+
     static void ColorRefreshTask(void* argument) {
         auto* self = static_cast<Ssd2683zaS3Board*>(argument);
         // NetworkEvent::Connected means the InkSight HTTP client can run. Fetch
@@ -997,10 +1110,27 @@ private:
                 ESP_LOGI(kTag, "XiaowuAI 首刷失败，回退首页菜单");
                 display_->ShowBootHome();
             }
+            ShowColorWelcomeIfNeeded("连不上服务器");
             cleanup();
             return;
         }
-        const bool was_unbound = inksight_device_unbound_.exchange(device_unbound);
+        inksight_device_unbound_.store(device_unbound);
+        if (device_unbound) {
+            preserve_pairing_welcome_.store(true);
+            display_->SetXiaowuPairCode(pair_code.c_str());
+            display_->dashboard().SetInkSightFooter(
+                pair_code.empty() ? "小悟设备绑定码暂未返回，稍后重试"
+                                  : "双平台绑定码显示在 A 屏；B 屏保留欢迎页");
+            ESP_LOGI(kTag, "设备未绑定：已取得小悟后台设备绑定码 %s",
+                     pair_code.empty() ? "(未返回)" : pair_code.c_str());
+            ShowColorWelcomeIfNeeded("设备未绑定");
+            cleanup();
+            return;
+        }
+        if (preserve_pairing_welcome_.load()) {
+            cleanup();
+            return;
+        }
         // 已绑定、但后台还没配任何双屏内容（也没手动指定 persona）：A 屏保
         // 持开机欢迎页，引导用户去后台配置；B 屏由 RefreshInkSightColor 继续
         // 渲染默认天气。否则后端对"未配置设备"会返回便签占位页，把欢迎页盖掉，
@@ -1009,26 +1139,14 @@ private:
         // 后端返回的占位画面，不至于点了没反应。
         if (!device_unbound && !dual_mode_.load() && persona.empty() &&
             display_->dashboard().IsWelcome()) {
-            ESP_LOGI(kTag, "后台未配置双屏内容：A 屏保持欢迎页（B 屏继续刷天气）");
+            ESP_LOGI(kTag, "后台未配置双屏内容：A 屏保持引导页（B 屏显示欢迎页）");
+            ShowColorWelcomeIfNeeded("后台未配置内容");
             cleanup();
             return;
         }
         display_->RawFrameRefresh(inksight_frame_,
                                   !initial_full_refresh /* partial */);
-        if (device_unbound) {
-            display_->dashboard().SetInkSightFooter(
-                pair_code.empty() ? "未绑定：配对码见 FPC1 · OK刷新"
-                                  : "未绑定 · 配对码 " + pair_code + " · 后台输入绑定");
-            // FPC2 不可用时配对码只画在 FPC1，用户不翻到看板页就永远看不到，
-            // 所以未绑定状态下自动切一次（was_unbound 保证只切一次，不会递归）。
-            if (!was_unbound && !display_->dashboard().IsInkSight()) {
-                ESP_LOGI(kTag, "未绑定：自动切到 XiaowuAI 页显示配对码 %s",
-                         pair_code.c_str());
-                display_->dashboard().Show(EpaperDashboard::Page::kInkSight);
-            }
-        } else {
-            display_->dashboard().SetInkSightFooter("OK刷新 · 长按返回");
-        }
+        display_->dashboard().SetInkSightFooter("OK刷新 · 长按返回");
         ESP_LOGI(kTag, "XiaowuAI refreshed (%s)",
                  initial_full_refresh ? "full" : "partial");
         cleanup();
@@ -1749,6 +1867,11 @@ private:
 
 public:
     Ssd2683zaS3Board() {
+#if EPD_BRINGUP_TEST
+        // 5.83" 双屏自检固件：只跑 UC8179 图案自检，刷完驻留不启动应用，
+        // 以免首页/配网页把自检图覆盖掉。EPD_BRINGUP_TEST 改回 0 即恢复正常。
+        RunEpd583BringupTest();
+#endif
         InitializePowerAmplifier();
         InitializeI2c();
         display_ = new Ssd1619Display();
@@ -1836,7 +1959,14 @@ public:
             display_->RunPatternSelfTest();
         }
         display_->ShowBootHome();
-        ESP_LOGI(kTag, "A 屏首屏显示欢迎页（已配置双屏内容时将被网络图覆盖）");
+        ESP_LOGI(kTag, "A 屏首屏显示引导页（已配置双屏内容时将被网络图覆盖）");
+#if EPD_ENABLE_COLOR_SCREEN
+        // B 屏开机门面：与网络无关，延时让开 A 屏首刷后刷内置欢迎页。
+        // 后台已配内容时，真实内容会在这之后覆盖欢迎页。
+        // 栈要和 color_refresh 对齐：里面会做 B 屏初始化、SPI 传输与日志，
+        // 4 KB 在开日志时容易踩栈。
+        xTaskCreate(ColorWelcomeTask, "color_welcome", 8192, this, 2, nullptr);
+#endif
         display_->dashboard().SetInkSightShow(
             [this](bool initial_full) {
                 Application::GetInstance().Schedule(

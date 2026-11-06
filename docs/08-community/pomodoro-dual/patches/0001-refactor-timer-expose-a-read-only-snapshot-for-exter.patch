@@ -1,0 +1,227 @@
+From ae528dad7aec570d2d54dbbdaad0398528dfe566 Mon Sep 17 00:00:00 2001
+From: upforever <upisqueen@gmail.com>
+Date: Thu, 5 Nov 2026 11:52:29 +0800
+Subject: [PATCH 1/3] refactor(timer): expose a read-only snapshot for external
+ renderers
+
+Timer carries eight states and a pile of fields that only its own layouts care about. Add snapshot() returning a small POD with just what an outside renderer needs: phase, run state, elapsed / remaining / overdue, cycle position and break lengths.
+
+The snapshot deliberately does not reuse TimerState. It carries its own two enums (TimerPhase, TimerRunState), so the state machine stays private and can change without breaking callers.
+
+Also adds SecondarySink and its call site in loop(), placed after display.display() rather than at the top of the loop. Notifying before the refresh makes a second panel read the timer one cycle early, which shows up as the two panels disagreeing by a second while paused.
+---
+ src/secondary_sink.h | 21 ++++++++++++++
+ src/timer.cpp        | 69 ++++++++++++++++++++++++++++++++++++++++++++
+ src/timer.h          | 11 +++++++
+ src/timer_snapshot.h | 48 ++++++++++++++++++++++++++++++
+ 4 files changed, 149 insertions(+)
+ create mode 100644 src/secondary_sink.h
+ create mode 100644 src/timer_snapshot.h
+
+diff --git a/src/secondary_sink.h b/src/secondary_sink.h
+new file mode 100644
+index 0000000..4ae9889
+--- /dev/null
++++ b/src/secondary_sink.h
+@@ -0,0 +1,21 @@
++#ifndef SECONDARY_SINK_H
++#define SECONDARY_SINK_H
++
++#include "timer_snapshot.h"
++
++// 副屏的唯一入口。
++//
++// Timer 不知道副屏是什么、接在哪、甚至有没有——它只在每次主屏刷新完之后
++// 调一次 onTimerSnapshot()。没有注册 sink 时这里连函数调用都不会发生，
++// 单屏固件的运行时行为因此零变化。
++//
++// fullRedraw 用来提示「主屏刚做过整屏刷」，副屏可以借这个时机一起整屏刷，
++// 避免两块屏的残影在不同时间点各自累积。
++class SecondarySink
++{
++public:
++    virtual ~SecondarySink() {}
++    virtual void onTimerSnapshot(const TimerSnapshot &snap, bool fullRedraw) = 0;
++};
++
++#endif // SECONDARY_SINK_H
+diff --git a/src/timer.cpp b/src/timer.cpp
+index 6fb4994..80c5bbc 100644
+--- a/src/timer.cpp
++++ b/src/timer.cpp
+@@ -416,15 +416,84 @@ void Timer::loop(volatile int *encoderCount)
+             display.display(true);
+         }
+ 
++        const bool wasFullRedraw = needsFullRedraw;
++
+         menuNeedsRedraw = false;
+         needsRedraw = false;
+         needsFullRedraw = false;
+         lastRedrawTime = millis();
+         Serial.printf("Timer::loop: display update took %d ms\n", millis() - start);
++
++        // 主屏刚画完，此刻把同一份状态交给副屏。放在刷新之后而不是 loop 开头，
++        // 是为了让两块屏显示的永远是同一个瞬间的计时值——否则副屏会比主屏
++        // 早一个循环，暂停时会看到两块屏差一秒。
++        if (sink)
++        {
++            sink->onTimerSnapshot(snapshot(), wasFullRedraw);
++        }
+     }
+ }
+ 
+ TimerState Timer::getState()
+ {
+     return state;
++}
++
++TimerSnapshot Timer::snapshot() const
++{
++    TimerSnapshot s;
++
++    s.presetName = currentPreset ? currentPreset->getName() : "";
++    s.focusDurationMs = currentPreset ? currentPreset->getDuration() : 0;
++    s.cycleTotal = currentPreset ? currentPreset->getLongPauseAfter() : 4;
++    s.completedCycles = cycles;
++    s.isLongBreak = isLongBreak;
++    s.breakDurationMs = currentBreakDuration
++                            ? currentBreakDuration
++                            : (currentPreset ? currentPreset->getPauseDuration() : 0);
++
++    const bool onBreak = (state == TimerState::RunningBreak ||
++                          state == TimerState::UserInitiatedBreakPause ||
++                          state == TimerState::WaitingConfirmEndOfBreak);
++
++    if (state == TimerState::SelectingPreset || state == TimerState::Stopped)
++    {
++        s.phase = TimerPhase::Idle;
++        s.runState = TimerRunState::Idle;
++    }
++    else
++    {
++        s.phase = onBreak ? TimerPhase::Break : TimerPhase::Focus;
++
++        switch (state)
++        {
++        case TimerState::Running:
++        case TimerState::RunningBreak:
++            s.runState = TimerRunState::Running;
++            break;
++        case TimerState::UserInitiatedPause:
++        case TimerState::UserInitiatedBreakPause:
++            s.runState = TimerRunState::Paused;
++            break;
++        case TimerState::WaitingConfirmStartOfBreak:
++        case TimerState::WaitingConfirmEndOfBreak:
++            s.runState = TimerRunState::Finished;
++            break;
++        default:
++            s.runState = TimerRunState::Idle;
++            break;
++        }
++    }
++
++    s.durationMs = onBreak ? s.breakDurationMs : s.focusDurationMs;
++    s.elapsedMs = elapsed;
++    s.remainingMs = s.durationMs > s.elapsedMs ? s.durationMs - s.elapsedMs : 0;
++    s.overdueMs = s.elapsedMs > s.durationMs ? s.elapsedMs - s.durationMs : 0;
++
++    const unsigned int setTotal = s.cycleTotal ? s.cycleTotal : 4;
++    s.cycleIndex = onBreak
++                       ? ((cycles % setTotal == 0) ? setTotal : cycles % setTotal)
++                       : (cycles % setTotal) + 1;
++
++    return s;
+ }
+\ No newline at end of file
+diff --git a/src/timer.h b/src/timer.h
+index 96f73b5..065e74b 100644
+--- a/src/timer.h
++++ b/src/timer.h
+@@ -17,6 +17,8 @@
+ #include "led.h"
+ #include "button.h"
+ #include "statistics.h"
++#include "timer_snapshot.h"
++#include "secondary_sink.h"
+ 
+ class Preset
+ {
+@@ -95,6 +97,9 @@ private:
+ 
+     bool showSpeechBubble = true;
+ 
++    // 副屏出口。为空时（单屏固件的默认情况）整个副屏逻辑不产生任何调用。
++    SecondarySink *sink = nullptr;
++
+     void drawWaitingForConfirmation();
+     void drawPresetSelection();
+     void drawPartialPresetSelection();
+@@ -127,6 +132,12 @@ public:
+     void loop(volatile int *encoderCount);
+     TimerState getState();
+     bool checkAndClearButtonPress();
++
++    // 接一块（或多块）副屏。传 nullptr 即摘掉。
++    void setSink(SecondarySink *s) { sink = s; }
++
++    // 只读快照：副屏据此渲染，不直接读 Timer 的私有字段，也不反过来改状态。
++    TimerSnapshot snapshot() const;
+ };
+ 
+ #endif
+diff --git a/src/timer_snapshot.h b/src/timer_snapshot.h
+new file mode 100644
+index 0000000..52ba8e6
+--- /dev/null
++++ b/src/timer_snapshot.h
+@@ -0,0 +1,48 @@
++#ifndef TIMER_SNAPSHOT_H
++#define TIMER_SNAPSHOT_H
++
++#include <Arduino.h>
++
++// 一次「定时器此刻长什么样」的只读快照。
++//
++// 存在的理由：副屏不应该、也不需要知道 Timer 的内部状态机（它有 8 个状态、
++// 一堆只有主屏版式才关心的字段）。把要展示的东西收窄成一个 POD，副屏实现
++// 换多少次都不会反过来影响主逻辑。
++//
++// 注意这里刻意没有复用 TimerState：那是主屏的状态机细节，副屏只关心
++// 「专注 / 休息 / 还没开始」和「在跑 / 停着」。两套枚举各管各的，改一边
++// 不会牵动另一边。
++
++enum class TimerPhase : uint8_t
++{
++    Idle,  // 还没开始，或停在选预设界面
++    Focus, // 专注段
++    Break  // 休息段
++};
++
++enum class TimerRunState : uint8_t
++{
++    Idle,     // 未运行
++    Running,  // 正在计时
++    Paused,   // 被用户暂停
++    Finished  // 本段时长已走完，等用户确认
++};
++
++struct TimerSnapshot
++{
++    TimerPhase phase;
++    TimerRunState runState;
++    const char *presetName;   // 当前预设名，可能为空串
++    unsigned long durationMs; // 本段应有的总时长
++    unsigned long elapsedMs;  // 已走时长（暂停期间冻结）
++    unsigned long remainingMs;
++    unsigned long overdueMs;     // 超出时长，等确认时才是非 0
++    unsigned int cycleIndex;      // 在本组（长休息周期）里排第几，1 起
++    unsigned int cycleTotal;      // 本组共几个
++    unsigned int completedCycles; // 开机以来累计走完的番茄数
++    bool isLongBreak;
++    unsigned long breakDurationMs; // 当前 / 下一段休息时长
++    unsigned long focusDurationMs; // 该预设的专注时长，休息时也要能显示
++};
++
++#endif // TIMER_SNAPSHOT_H

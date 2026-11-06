@@ -1,0 +1,16 @@
+# 发行包排除规则
+#
+# docs/08-community/pomodoro-dual/patches/ 含有上游（Rukenshia/pomodoro，
+# 无 LICENSE）的代码片段，仅用于向上游提交 PR，禁止进入任何发行物。
+# 详见 docs/08-community/pomodoro-dual/NOTICE.md
+#
+# export-ignore 作用于 git archive，因此下面命令产出的包天然不含这些文件：
+#   git archive --format=zip -o release.zip HEAD
+docs/08-community export-ignore
+
+# 构建与本地调试产物
+output/ export-ignore
+_work/ export-ignore
+*.log export-ignore
+preview_A.png export-ignore
+preview_B.png export-ignore

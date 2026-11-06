@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <string>
 
 #include <driver/spi_master.h>
 #include <freertos/FreeRTOS.h>
@@ -10,6 +12,8 @@
 #include "config.h"
 #include "epaper_dashboard.h"
 #include "lcd_display.h"
+
+class Uc1679Display;
 
 class Ssd1619Display : public LcdDisplay {
 public:
@@ -21,6 +25,7 @@ public:
     void SetChatMessage(const char* role, const char* content) override;
     void ShowActivationUi(const char* message, const char* code) override;
     void ShowProvisioningGuide(const char* ssid, const char* url) override;
+    void SetXiaowuPairCode(const char* code);
     void HideActivationUi() override;
     void ClearChatMessages() override;
     void SetupUI() override;
@@ -42,8 +47,16 @@ public:
     void RawFrameRefresh(const uint8_t* frame, bool partial);
     void ReleaseExternalFrameHold();
 
+    // 现场诊断：连刷「全黑 / 全白 / 横向黑白条纹」三张纯色图。
+    // 三张图肉眼可见地变化 → 面板与波形正常，问题在上游取图/解码；
+    // 三张图纹丝不动 → 面板没有驱动电压（升压/供电/换屏），与软件无关。
+    void RunPatternSelfTest();
+
     bool IsPanelBusy() const {
-        if (busy_idle_level_ < 0 || panel_faulted_) return false;
+        // BUSY 线已通过上下拉测试判定为浮空时，GPIO 电平不代表面板忙闲。
+        // 双屏初始化本身持有 EpaperBusMutex，确保轮到彩屏复位时 A 屏传输已结束；
+        // 此处若仍按 GPIO 恒高判断，会让 FPC2 无意义等待 25 秒。
+        if (!busy_driven_ || busy_idle_level_ < 0 || panel_faulted_) return false;
         return gpio_get_level(busy_pin_) != busy_idle_level_;
     }
 
@@ -52,10 +65,18 @@ private:
     static constexpr size_t kFrameBytes = kStride * DISPLAY_HEIGHT;
 
     spi_device_handle_t spi_ = nullptr;
+    // FPC1 改装为三色面板时，LVGL/dashboard 继续复用此类作画，物理刷新转交 UC1679。
+    Uc1679Display* fpc1_color_driver_ = nullptr;
     uint8_t* frame_ = nullptr;
     uint8_t* tx_frame_ = nullptr;
     uint8_t* panel_frame_ = nullptr;
     uint8_t* dma_buffer_ = nullptr;
+    // 仅自检使用：为 true 时全刷前多发一条 0x04（Power ON）。
+    bool self_test_pon_ = false;
+    // 全刷时 0x26（旧画面参考平面）的写法：false = 与 0x24 同一份数据，
+    // true = 写新画面的反相。现场自检用它四选一定论：这块 4.2" 的 OTP 全刷
+    // 波形到底是绝对驱动（0x26 不参与）还是差分驱动（只驱动 0x24≠0x26 的像素）。
+    bool invert_old_plane_ = false;
     SemaphoreHandle_t mutex_ = nullptr;
     TaskHandle_t refresh_task_ = nullptr;
     bool refresh_pending_ = false;
@@ -68,6 +89,9 @@ private:
     bool base_frame_valid_ = false;
     uint16_t partial_refresh_count_ = 0;
     bool assistant_response_active_ = false;
+    std::string activation_message_;
+    std::string xiaozhi_activation_code_;
+    std::string xiaowu_pair_code_;
     int busy_idle_level_ = -1;
     // BUSY 引脚在一段时间内完全没有跳变（既不为忙也不回空闲）。这通常不是
     // 极性判反，而是面板根本没驱动这条线：FPC 没插好 / 屏插在另一个座上
@@ -100,7 +124,7 @@ private:
                              uint32_t busyless_total_ms = 0);
     void Command(uint8_t command, const uint8_t* data = nullptr, size_t length = 0);
     void Data(const uint8_t* data, size_t length);
-    void InitializePanel();
+    bool InitializePanel();
     // 采样 BUSY 引脚的"空闲电平"。必须等它稳定后再取，否则会把复位期间的
     // 忙电平当成空闲，导致后续 idle->busy->idle 判定整体反向。
     int DetectBusyIdleLevel();

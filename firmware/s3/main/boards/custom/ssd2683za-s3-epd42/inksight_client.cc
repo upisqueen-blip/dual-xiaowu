@@ -777,7 +777,8 @@ bool InkSightClient::Load2bpp(NetworkInterface* network,
                               uint8_t* red_plane,
                               std::string& error,
                               int* server_refresh_minutes,
-                              bool* device_unbound_out) {
+                              bool* device_unbound_out,
+                              std::string* pair_code_out) {
     static constexpr size_t kRaw2bppBytes = kColorWidth * kColorHeight / 4;
     static constexpr size_t kPlaneBytes = kColorStride * kColorHeight;
 
@@ -785,6 +786,7 @@ bool InkSightClient::Load2bpp(NetworkInterface* network,
     std::memset(bw_plane, 0xFF, kPlaneBytes);
     std::memset(red_plane, 0x00, kPlaneBytes);
     if (device_unbound_out) *device_unbound_out = false;
+    if (pair_code_out) pair_code_out->clear();
     if (!network) {
         error = "no network interface";
         return false;
@@ -901,6 +903,9 @@ bool InkSightClient::Load2bpp(NetworkInterface* network,
         ReadPendingRefreshHeader(http.get());
         const bool device_unbound =
             http->GetResponseHeader("X-Device-Unbound") == "1";
+        const std::string pair_code = http->GetResponseHeader("X-Pair-Code");
+        if (device_unbound_out) *device_unbound_out = device_unbound;
+        if (pair_code_out) *pair_code_out = pair_code;
 
         // 流式读满 kRaw2bppBytes；多读的部分丢弃。
         size_t got = 0;
@@ -1095,8 +1100,10 @@ bool InkSightClient::ReportRuntimeMode(NetworkInterface* network,
                                       const std::string& device_id,
                                       bool active,
                                       bool awake,
-                                      std::string* error) {
+                                      std::string* error,
+                                      bool* refresh_required) {
     if (error) error->clear();
+    if (refresh_required) *refresh_required = false;
     if (!network || server.empty() || device_id.empty()) {
         if (error) *error = "no network or server";
         return false;
@@ -1125,7 +1132,13 @@ bool InkSightClient::ReportRuntimeMode(NetworkInterface* network,
         return false;
     }
     const int status = http->GetStatusCode();
-    if (status >= 200 && status < 300) return true;
+    if (status >= 200 && status < 300) {
+        const std::string body = http->ReadAll();
+        if (refresh_required && body.find("\"refresh_required\":true") != std::string::npos) {
+            *refresh_required = true;
+        }
+        return true;
+    }
     char message[48];
     std::snprintf(message, sizeof(message), "runtime HTTP %d", status);
     if (error) *error = message;

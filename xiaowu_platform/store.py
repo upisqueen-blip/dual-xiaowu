@@ -254,6 +254,18 @@ class Store:
             );
             CREATE INDEX IF NOT EXISTS idx_grants_device ON app_device_grants(device_id, status);
             CREATE INDEX IF NOT EXISTS idx_grants_user ON app_device_grants(user_id);
+            CREATE TABLE IF NOT EXISTS pomodoro_sessions (
+              device_id TEXT PRIMARY KEY, preset_key TEXT NOT NULL,
+              preset_json TEXT NOT NULL DEFAULT '{}', phase TEXT NOT NULL,
+              status TEXT NOT NULL, started_at TEXT NOT NULL, duration_s INTEGER NOT NULL,
+              cycle_index INTEGER NOT NULL DEFAULT 1, paused_at TEXT,
+              paused_total_s INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS pomodoro_daily (
+              device_id TEXT NOT NULL, day TEXT NOT NULL,
+              focus_count INTEGER NOT NULL DEFAULT 0, focus_seconds INTEGER NOT NULL DEFAULT 0,
+              updated_at TEXT NOT NULL, PRIMARY KEY(device_id, day)
+            );
             """)
             columns = {row[1] for row in db.execute("PRAGMA table_info(devices)")}
             if "pending_refresh" not in columns:
@@ -1523,6 +1535,77 @@ class Store:
             return None
         return {"user_id": row["user_id"], "connector_id": row["connector_id"]}
 
+    # ——— 番茄钟：当前会话 + 当日统计 ———
+    # 会话表按 device_id 唯一（一台设备同时只跑一个番茄钟），只存绝对时间戳，
+    # 剩余时间由 pomodoro.view() 现算，因此设备离线 / 服务重启都不会走偏。
+    def get_pomodoro_session(self, device_id: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            for cand in _mac_candidates(device_id):
+                row = db.execute("SELECT * FROM pomodoro_sessions WHERE device_id=?", (cand,)).fetchone()
+                if row:
+                    return self._pomodoro_row(row)
+        return None
+
+    def save_pomodoro_session(self, data: dict[str, Any]) -> None:
+        preset = data.get("preset") or {}
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO pomodoro_sessions(device_id,preset_key,preset_json,phase,status,started_at,"
+                "duration_s,cycle_index,paused_at,paused_total_s,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(device_id) DO UPDATE SET preset_key=excluded.preset_key,"
+                "preset_json=excluded.preset_json, phase=excluded.phase, status=excluded.status,"
+                "started_at=excluded.started_at, duration_s=excluded.duration_s,"
+                "cycle_index=excluded.cycle_index, paused_at=excluded.paused_at,"
+                "paused_total_s=excluded.paused_total_s, updated_at=excluded.updated_at",
+                (_pomodoro_key(data.get("device_id")), str(data.get("preset_key") or "focus"),
+                 json.dumps(preset, ensure_ascii=False), str(data.get("phase") or "focus"),
+                 str(data.get("status") or "idle"), str(data.get("started_at") or now_iso()),
+                 int(data.get("duration_s") or 0), int(data.get("cycle_index") or 1),
+                 data.get("paused_at"), int(data.get("paused_total_s") or 0),
+                 str(data.get("updated_at") or now_iso())),
+            )
+
+    def clear_pomodoro_session(self, device_id: str) -> bool:
+        with self.connect() as db:
+            cur = db.execute("DELETE FROM pomodoro_sessions WHERE device_id=?", (_pomodoro_key(device_id),))
+        return cur.rowcount > 0
+
+    def bump_pomodoro_daily(self, device_id: str, day: str, focus_seconds: int) -> None:
+        """完成一个专注回合：番茄数 +1、专注秒数累加。"""
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO pomodoro_daily(device_id,day,focus_count,focus_seconds,updated_at) "
+                "VALUES(?,?,1,?,?) ON CONFLICT(device_id,day) DO UPDATE SET "
+                "focus_count=focus_count+1, focus_seconds=focus_seconds+excluded.focus_seconds,"
+                "updated_at=excluded.updated_at",
+                (_pomodoro_key(device_id), day, max(0, int(focus_seconds)), now_iso()),
+            )
+
+    def get_pomodoro_daily(self, device_id: str, day: str) -> dict[str, Any]:
+        with self.connect() as db:
+            row = db.execute("SELECT focus_count,focus_seconds FROM pomodoro_daily WHERE device_id=? AND day=?",
+                             (_pomodoro_key(device_id), day)).fetchone()
+        return {"focus_count": int(row["focus_count"]) if row else 0,
+                "focus_seconds": int(row["focus_seconds"]) if row else 0, "day": day}
+
+    @staticmethod
+    def _pomodoro_row(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        try:
+            item["preset"] = json.loads(item.pop("preset_json") or "{}")
+        except json.JSONDecodeError:
+            item["preset"] = {}
+        return item
+
+
+def _pomodoro_key(device_id: str | None) -> str:
+    """番茄钟主键统一用冒号大写形式，避免 44:B1:.. / 44b176.. 两种写法各存一行。"""
+    for cand in _mac_candidates(device_id):
+        if ":" in cand:
+            return cand
+    return str(device_id or "").strip().upper()
+
 
 DEFAULT_TEMPLATES = [
     {"template_id": "notice-card", "name": "通用通知", "category": "general", "schema_definition": {"required": ["title", "content"]}},
@@ -1530,4 +1613,7 @@ DEFAULT_TEMPLATES = [
     {"template_id": "vocabulary-card", "name": "单词学习", "category": "education", "schema_definition": {"required": ["word", "meaning"]}},
     {"template_id": "care-reminder", "name": "照护提醒", "category": "elder-care", "schema_definition": {"required": ["title", "time", "content"], "notice": "仅作提醒，不构成医疗建议"}},
     {"template_id": "daily-schedule", "name": "今日安排", "category": "elder-care", "schema_definition": {"required": ["title", "items"]}},
+    {"template_id": "pomodoro-card", "name": "专注番茄", "category": "office",
+     "schema_definition": {"required": ["title", "phase", "remaining"],
+                           "notice": "双屏版式由 dual_config 的 mode=pomodoro 服务端出图，无需逐条推送"}},
 ]

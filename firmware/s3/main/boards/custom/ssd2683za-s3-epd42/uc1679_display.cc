@@ -12,6 +12,9 @@
 
 namespace {
 constexpr char kTag[] = "Uc1679Display";
+const char* PanelName(gpio_num_t cs_pin) {
+    return cs_pin == EPD_CS_PIN_FPC1 ? "FPC1" : "FPC2";
+}
 
 // OLD 变种(0x10/0x13/0x12) 数据值
 constexpr uint8_t k83PanelSettingData = 0x0F;  // 0x00: 400x300, B/W/R, OTP 波形
@@ -32,9 +35,18 @@ constexpr uint32_t kRefreshBusyTimeoutMs = 30000;  // 全刷波形上限（三�
 }  // namespace
 
 std::atomic<bool> Uc1679Display::g_uc1679_refreshing{false};
+namespace {
+std::atomic<unsigned> g_uc1679_active_panels{0};
+}
 
 Uc1679Display::Uc1679Display(std::function<bool()> other_panel_busy)
-    : other_panel_busy_(std::move(other_panel_busy)) {
+    : Uc1679Display(EPD_COLOR_CS_PIN, EPD_COLOR_BUSY_PIN,
+                    std::move(other_panel_busy)) {}
+
+Uc1679Display::Uc1679Display(gpio_num_t cs_pin, gpio_num_t busy_pin,
+                             std::function<bool()> other_panel_busy)
+    : cs_pin_(cs_pin), busy_pin_(busy_pin),
+      other_panel_busy_(std::move(other_panel_busy)) {
     mutex_ = xSemaphoreCreateMutex();
     dma_buffer_ = static_cast<uint8_t*>(
         heap_caps_malloc(kDmaChunkBytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
@@ -51,13 +63,13 @@ Uc1679Display::~Uc1679Display() {
 
 void Uc1679Display::InitializeGpio() {
     gpio_config_t outputs = {};
-    outputs.pin_bit_mask = 1ULL << EPD_COLOR_CS_PIN;
+    outputs.pin_bit_mask = 1ULL << cs_pin_;
     outputs.mode = GPIO_MODE_OUTPUT;
     ESP_ERROR_CHECK(gpio_config(&outputs));
-    gpio_set_level(EPD_COLOR_CS_PIN, 1);
+    gpio_set_level(cs_pin_, 1);
 
     gpio_config_t busy = {};
-    busy.pin_bit_mask = 1ULL << EPD_COLOR_BUSY_PIN;
+    busy.pin_bit_mask = 1ULL << busy_pin_;
     busy.mode = GPIO_MODE_INPUT;
     busy.pull_up_en = GPIO_PULLUP_ENABLE;
     ESP_ERROR_CHECK(gpio_config(&busy));
@@ -79,13 +91,12 @@ void Uc1679Display::InitializeSpiDevice() {
 
 void Uc1679Display::WaitForOtherPanelIdle() {
     if (!other_panel_busy_ || !other_panel_busy_()) return;
-    ESP_LOGW(kTag, "Shared RST: waiting for SSD1619 refresh to finish");
+    ESP_LOGW(kTag, "Shared RST: waiting for other panel refresh to finish");
     const TickType_t start = xTaskGetTickCount();
     while (other_panel_busy_()) {
         if ((xTaskGetTickCount() - start) * portTICK_PERIOD_MS >= 25000) {
             ESP_LOGE(kTag,
-                     "SSD1619 refresh wait timeout; resetting anyway "
-                     "(BW panel partial waveform may be disturbed)");
+                     "other panel refresh wait timeout; resetting anyway");
             break;
         }
         vTaskDelay(pdMS_TO_TICKS(50));
@@ -110,16 +121,16 @@ int Uc1679Display::DetectIdleLevel() {
     // 翻转，证明该线已连到面板 BUSY；若三色屏 BUSY 始终不翻转，说明面板未上电/
     // 未进入激活态，而非 BUSY 断线。
     vTaskDelay(pdMS_TO_TICKS(30));
-    int idle = gpio_get_level(EPD_COLOR_BUSY_PIN);
+    int idle = gpio_get_level(busy_pin_);
     for (int i = 0; i < 3; ++i) {
         vTaskDelay(pdMS_TO_TICKS(8));
-        const int now = gpio_get_level(EPD_COLOR_BUSY_PIN);
+        const int now = gpio_get_level(busy_pin_);
         if (now != idle) idle = now;
     }
     busy_idle_level_ = idle;
     busy_active_level_ = (idle == 0) ? 1 : 0;
-    ESP_LOGI(kTag, "FPC2 复位后 BUSY(GPIO%d)=%d → 空闲电平=%d 有效电平(忙)=%d",
-             EPD_COLOR_BUSY_PIN, idle, busy_idle_level_, busy_active_level_);
+    ESP_LOGI(kTag, "%s 三色面板复位后 BUSY(GPIO%d)=%d → 空闲电平=%d 有效电平(忙)=%d",
+             PanelName(cs_pin_), busy_pin_, idle, busy_idle_level_, busy_active_level_);
     return idle;
 }
 
@@ -127,11 +138,11 @@ bool Uc1679Display::WaitBusy(uint32_t timeout_ms) {
     if (busy_active_level_ < 0) return true;
     const TickType_t start = xTaskGetTickCount();
     // 忙时引脚处于有效电平；等待其回落到空闲电平即完成。
-    while (gpio_get_level(EPD_COLOR_BUSY_PIN) == busy_active_level_) {
+    while (gpio_get_level(busy_pin_) == busy_active_level_) {
         if ((xTaskGetTickCount() - start) * portTICK_PERIOD_MS >= timeout_ms) {
             ESP_LOGE(kTag, "BUSY 超时 %lu ms (GPIO%d=%d, 有效电平=%d)",
-                     static_cast<unsigned long>(timeout_ms), EPD_COLOR_BUSY_PIN,
-                     gpio_get_level(EPD_COLOR_BUSY_PIN), busy_active_level_);
+                     static_cast<unsigned long>(timeout_ms), busy_pin_,
+                     gpio_get_level(busy_pin_), busy_active_level_);
             return false;
         }
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -143,7 +154,7 @@ void Uc1679Display::Command(uint8_t command, const uint8_t* data,
                             size_t length, bool invert_data) {
     if (!spi_) return;
     // CS 在「命令 + 数据」整个期间保持低电平（与已验证的 4 色驱动一致）。
-    gpio_set_level(EPD_COLOR_CS_PIN, 0);
+    gpio_set_level(cs_pin_, 0);
     gpio_set_level(EPD_DC_PIN, 0);
     spi_transaction_t transaction = {};
     transaction.length = 8;
@@ -162,7 +173,7 @@ void Uc1679Display::Command(uint8_t command, const uint8_t* data,
             dt.tx_buffer = dma_buffer_;
             const esp_err_t err = spi_device_polling_transmit(spi_, &dt);
             if (err != ESP_OK) {
-                gpio_set_level(EPD_COLOR_CS_PIN, 1);
+                gpio_set_level(cs_pin_, 1);
                 ESP_LOGE(kTag, "SPI data transmit failed: %s, chunk=%u",
                          esp_err_to_name(err), static_cast<unsigned>(chunk));
                 return;
@@ -171,13 +182,13 @@ void Uc1679Display::Command(uint8_t command, const uint8_t* data,
             length -= chunk;
         }
     }
-    gpio_set_level(EPD_COLOR_CS_PIN, 1);
+    gpio_set_level(cs_pin_, 1);
 }
 
 void Uc1679Display::Data(const uint8_t* data, size_t length) {
     if (!spi_) return;
     gpio_set_level(EPD_DC_PIN, 1);
-    gpio_set_level(EPD_COLOR_CS_PIN, 0);
+    gpio_set_level(cs_pin_, 0);
     while (length > 0) {
         const size_t chunk = std::min(length, kDmaChunkBytes);
         std::memcpy(dma_buffer_, data, chunk);
@@ -186,7 +197,7 @@ void Uc1679Display::Data(const uint8_t* data, size_t length) {
         transaction.tx_buffer = dma_buffer_;
         const esp_err_t err = spi_device_polling_transmit(spi_, &transaction);
         if (err != ESP_OK) {
-            gpio_set_level(EPD_COLOR_CS_PIN, 1);
+            gpio_set_level(cs_pin_, 1);
             ESP_LOGE(kTag, "SPI data transmit failed: %s, chunk=%u",
                      esp_err_to_name(err), static_cast<unsigned>(chunk));
             return;
@@ -194,7 +205,7 @@ void Uc1679Display::Data(const uint8_t* data, size_t length) {
         data += chunk;
         length -= chunk;
     }
-    gpio_set_level(EPD_COLOR_CS_PIN, 1);
+    gpio_set_level(cs_pin_, 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -279,6 +290,7 @@ bool Uc1679Display::ActivateAndWait(int variant, uint32_t busy_timeout_ms) {
 bool Uc1679Display::Init() {
     EpaperBusGuard bus_guard;
     xSemaphoreTake(mutex_, portMAX_DELAY);
+    const bool was_available = available_;
     bool ok = false;
 
     // 全白 / 无红的探测帧（PSRAM，避免占用内部 RAM）。
@@ -316,17 +328,22 @@ bool Uc1679Display::Init() {
         available_ = ok;  // PSRAM 分配失败 → false
         ESP_LOGE(kTag, "PSRAM 分配失败，无法探测三色面板");
     }
+    if (!was_available && available_) {
+        g_uc1679_active_panels.fetch_add(1);
+    } else if (was_available && !available_) {
+        g_uc1679_active_panels.fetch_sub(1);
+    }
 
     if (ok) {
         ESP_LOGI(kTag,
                  "三色面板就绪: CS=GPIO%d BUSY=GPIO%d variant=%d (BUSY 空闲=%d)",
-                 EPD_COLOR_CS_PIN, EPD_COLOR_BUSY_PIN, variant_,
+                 cs_pin_, busy_pin_, variant_,
                  busy_idle_level_);
     } else {
         ESP_LOGE(kTag,
-                 "三色面板未响应(CS=GPIO%d BUSY=GPIO%d)。若确认插屏，检查 FPC2 "
-                 "座子/电源；PON 后 BUSY 是否翻转可判定面板是否上电。",
-                 EPD_COLOR_CS_PIN, EPD_COLOR_BUSY_PIN);
+                 "%s 三色面板未响应(CS=GPIO%d BUSY=GPIO%d)。检查当前座子/电源；"
+                 "PON 后 BUSY 是否翻转可判定面板是否上电。",
+                 PanelName(cs_pin_), cs_pin_, busy_pin_);
     }
     xSemaphoreGive(mutex_);
     return ok;

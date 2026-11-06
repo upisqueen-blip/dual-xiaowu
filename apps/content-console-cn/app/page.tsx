@@ -6,14 +6,16 @@ import {
   AudioLines, History, KeyRound, LayoutDashboard, Link2, ListChecks, LoaderCircle, LogOut, MessageSquare, Mic, MonitorCog, MoreHorizontal,
   NotebookPen, Play, Plus, RefreshCw, Save, ScanText, Settings2, ShieldCheck, Sparkles, Square, StickyNote, Trash2, UserCog, Users,
   Image as ImageIcon,
-  WalletCards, Truck, Wifi, X, Compass,
+  WalletCards, Truck, Wifi, X, Compass, Lock, LogIn,
   Coins, TrendingUp,
 } from "lucide-react";
 import { api, authHeaders, BASE_PATH, clearToken, getToken, setToken } from "@/lib/api";
 
 type SceneKey = string;
 type NavKey = "dashboard" | "scenes" | "screens" | "content" | "apps" | "financeStocks" | "devices" | "members" | "profile" | "connectors" | "settings" | "guide";
-type ScreenConfig = { title: string; source: string; refresh: string; modules: string[]; mode?: string; appId?: string };
+// 番茄钟参数：与后端 pomodoro.Preset 字段一一对应，缺省项由后端回落到内置预设。
+type PomodoroPreset = { key?: string; name?: string; focus_minutes?: number; short_break_minutes?: number; long_break_minutes?: number; long_break_after?: number };
+type ScreenConfig = { title: string; source: string; refresh: string; modules: string[]; mode?: string; appId?: string; preset?: PomodoroPreset };
 type DualWeatherPreview = { city: string; today_temp: string; current_temp?: string; today_desc: string; today_code?: number; today_low: string; today_high: string; today_humidity?: string; today_wind_dir?: string; today_wind_level?: string; sunrise?: string; sunset?: string; advice?: string; forecast?: { day: string; date: string; temp_range: string; desc: string; code?: number }[]; feels_like?: string | number | null; city_pinyin?: string; solar_term?: string; solar_term_day?: string; updated_at?: string; lunar_date?: string; lunar_year?: string; lunar_zodiac?: string; plate_limit?: string };
 type Scene = { name: string; eyebrow: string; desc: string; icon: string; a: ScreenConfig; b: ScreenConfig };
 type User = { user_id: number; username: string };
@@ -87,17 +89,19 @@ function normalizeConfig(saved?: Partial<Record<string, { a?: Partial<ScreenConf
   return out;
 }
 
-const navItems: { key: NavKey; label: string; icon: typeof Home }[] = [
+// auth: true 表示「必须有账号才有意义」的菜单。未登录时一律不渲染，
+// 避免访客看到一整列点进去全是空态的入口。
+const navItems: { key: NavKey; label: string; icon: typeof Home; auth?: boolean }[] = [
   { key: "dashboard", label: "总览", icon: LayoutDashboard },
   { key: "scenes", label: "场景中心", icon: Sparkles },
   { key: "screens", label: "双屏配置", icon: MonitorCog },
   { key: "content", label: "内容管理", icon: NotebookPen },
   { key: "apps", label: "已上线应用", icon: Boxes },
-  { key: "devices", label: "设备管理", icon: Cpu },
-  { key: "members", label: "共享成员", icon: Users },
-  { key: "connectors", label: "连接器", icon: Link2 },
-  { key: "profile", label: "个人信息", icon: UserCog },
-  { key: "settings", label: "系统配置", icon: Settings2 },
+  { key: "devices", label: "设备管理", icon: Cpu, auth: true },
+  { key: "members", label: "共享成员", icon: Users, auth: true },
+  { key: "connectors", label: "连接器", icon: Link2, auth: true },
+  { key: "profile", label: "个人信息", icon: UserCog, auth: true },
+  { key: "settings", label: "系统配置", icon: Settings2, auth: true },
   { key: "guide", label: "配置引导", icon: Compass },
 ];
 
@@ -126,6 +130,15 @@ export default function DualConsole() {
 
   const scene = scenes[sceneKey];
   const selectedDevice = devices.find((d) => d.mac === deviceMac) || devices[0];
+
+  // 未登录 → 只留「能看、能配、能预览」的菜单，账号级入口全部收起。
+  const visibleNav = useMemo(() => navItems.filter((i) => !i.auth || !!user), [user]);
+  const hiddenNavCount = navItems.length - visibleNav.length;
+  // 退出登录或会话失效时，若正停在受保护页面，退回总览，避免路由停在空态上。
+  useEffect(() => {
+    if (user) return;
+    if (navItems.some((i) => i.key === nav && i.auth)) setNav("dashboard");
+  }, [user, nav]);
 
   useEffect(() => {
     const raw = localStorage.getItem("xiaowu_dual_config");
@@ -315,7 +328,8 @@ export default function DualConsole() {
         <div className="brand"><img className="brand-mark" src={`${BASE_PATH}/logo.png`} alt="森穹小悟"/><div><strong>森穹小悟</strong><span>DUAL DISPLAY</span></div></div>
         <div className="nav-label">工作台</div>
         <nav>
-          {navItems.map((item) => <button key={item.key} className={nav === item.key ? "active" : ""} onClick={() => setNav(item.key)}><item.icon size={18}/>{item.label}{item.key === "devices" && devices.length > 0 ? <em>{devices.length}</em> : null}</button>)}
+          {visibleNav.map((item) => <button key={item.key} className={nav === item.key ? "active" : ""} onClick={() => setNav(item.key)}><item.icon size={18}/>{item.label}{item.key === "devices" && devices.length > 0 ? <em>{devices.length}</em> : null}</button>)}
+          {!user && hiddenNavCount > 0 ? <button className="nav-note" onClick={() => setAuthOpen(true)}><Lock size={13}/><span>设备管理、共享成员等 {hiddenNavCount} 项<br/>登录后可用</span></button> : null}
           <a className="developer-link" href={developerCenterUrl}><Code2 size={18}/>开发者中心</a>
         </nav>
         <div className="sidebar-foot">
@@ -323,7 +337,7 @@ export default function DualConsole() {
           <div className="hardware-map"><span><i className="dot-b"/>B 屏 · FPC2</span><small>三色 / 四色</small></div>
           <div className="profile">
             <CircleUserRound size={28}/><div><b>{user?.username || "未登录"}</b><span>{user ? "设备管理员" : "登录后管理设备"}</span></div>
-            {user ? <button aria-label="退出" onClick={logout}><LogOut size={16}/></button> : null}
+            {user ? <button className="profile-exit" aria-label="退出登录" title="退出登录" onClick={logout}><LogOut size={15}/><span>退出</span></button> : <button className="profile-exit" onClick={() => setAuthOpen(true)}><LogIn size={15}/><span>登录</span></button>}
           </div>
         </div>
       </aside>
@@ -1028,9 +1042,9 @@ function ScreenEditor({ scene, sceneKey, value, update, save, savedAt, content, 
     <ScreenSettings value={screen} onChange={setScreen} sceneKey={sceneKey} bMode={value.b.mode || defaultMode(sceneKey, "b")} deviceMac={deviceMac} />
     <div className="editor-grid">
       <ScreenForm kind="a" sceneKey={sceneKey} value={value.a} onChange={(p) => update("a", p)}/>
-      <ScreenPreview kind="a" sceneKey={sceneKey} scene={scene.name} config={value.a} content={content} screen={screen} weatherPreview={weatherPreview} weatherLoading={weatherLoading} weatherError={weatherError}/>
+      <ScreenPreview kind="a" sceneKey={sceneKey} scene={scene.name} config={value.a} content={content} screen={screen} deviceMac={deviceMac} weatherPreview={weatherPreview} weatherLoading={weatherLoading} weatherError={weatherError}/>
       <ScreenForm kind="b" sceneKey={sceneKey} value={value.b} onChange={(p) => update("b", p)}/>
-      <ScreenPreview kind="b" sceneKey={sceneKey} scene={scene.name} config={value.b} content={content} screen={screen}/>
+      <ScreenPreview kind="b" sceneKey={sceneKey} scene={scene.name} config={value.b} content={content} screen={screen} deviceMac={deviceMac}/>
     </div>
     {scene.name === "学习" ? <DualPreview content={content} screen={screen} sceneKey={sceneKey} aMode={value.a.mode || "notes"} /> : sceneKey === "family" ? <DualPreview content={content} screen={screen} sceneKey={sceneKey} aMode={value.a.mode || "family"} bMode={value.b.mode || "family"} weatherPreview={weatherPreview} weatherLoading={weatherLoading} weatherError={weatherError} /> : null}
     <div className="sticky-save"><div><b>保存双屏模式</b><span>分别写入 A/B 屏通道；旧版单屏配置不受影响。</span></div><div className="save-actions"><button className="button primary" onClick={save}><Save size={16}/>保存模式</button><button className="button soft" onClick={apply} disabled={!hasDevice} title={hasDevice ? "下发到所选设备" : "请先在设备管理绑定设备"}><Cloud size={16}/>应用到设备</button></div></div>
@@ -1113,14 +1127,48 @@ const SCENE_MODES: Record<SceneKey, { a: { key: string; label: string }[]; b: { 
     b: [{ key: "health-plan", label: "养生计划" }, { key: "health-sleep", label: "作息与睡眠" }],
   },
   office: {
-    a: [{ key: "office", label: "工作信息" }, { key: "notes", label: "便签" }],
-    b: [{ key: "album", label: "展示相册" }, { key: "office", label: "办公看板" }],
+    a: [{ key: "office", label: "工作信息" }, { key: "pomodoro", label: "专注番茄" }, { key: "notes", label: "便签" }],
+    b: [{ key: "album", label: "展示相册" }, { key: "pomodoro", label: "今日专注统计" }, { key: "office", label: "办公看板" }],
   },
   custom: {
-    a: [{ key: "notes", label: "便签" }, { key: "homework", label: "待办" }, { key: "reading", label: "阅读" }, { key: "album", label: "相册" }, { key: "published-app", label: "已上线应用" }],
-    b: [{ key: "course", label: "课程表" }, { key: "calendar", label: "日历" }, { key: "album", label: "相册" }, { key: "published-app", label: "已上线应用" }],
+    a: [{ key: "notes", label: "便签" }, { key: "homework", label: "待办" }, { key: "reading", label: "阅读" }, { key: "album", label: "相册" }, { key: "pomodoro", label: "专注番茄" }, { key: "published-app", label: "已上线应用" }],
+    b: [{ key: "course", label: "课程表" }, { key: "calendar", label: "日历" }, { key: "album", label: "相册" }, { key: "pomodoro", label: "今日专注统计" }, { key: "published-app", label: "已上线应用" }],
   },
 };
+
+const POMODORO_PRESETS = [
+  { key: "focus", label: "经典 25/5", name: "专注", focus: 25, short: 5, long: 20, after: 4 },
+  { key: "coding", label: "长时段 45/15", name: "写代码", focus: 45, short: 15, long: 30, after: 2 },
+  { key: "email", label: "短时段 15/5", name: "处理邮件", focus: 15, short: 5, long: 15, after: 4 },
+];
+
+// 番茄钟参数编辑：点预设一键填满，再按需微调；写回 a.preset，后端 pomodoro.preset_from_config 读取。
+function PomodoroConfig({ value, onChange }: { value?: PomodoroPreset; onChange: (p: PomodoroPreset) => void }) {
+  const cur = value || {};
+  const active = cur.key || "focus";
+  const num = (k: keyof PomodoroPreset, fallback: number) => (typeof cur[k] === "number" ? (cur[k] as number) : fallback);
+  const setNum = (k: keyof PomodoroPreset, raw: string) => {
+    const n = Number(raw);
+    onChange({ ...cur, [k]: Number.isFinite(n) && n > 0 ? Math.round(n) : undefined });
+  };
+  return <div className="pomo-config">
+    <div className="pomo-chips">
+      {POMODORO_PRESETS.map((p) => <button key={p.key} type="button" className={`pomo-chip${active === p.key ? " on" : ""}`}
+        onClick={() => onChange({ key: p.key, name: p.name, focus_minutes: p.focus, short_break_minutes: p.short, long_break_minutes: p.long, long_break_after: p.after })}>
+        {p.label}
+      </button>)}
+    </div>
+    <div className="field-row">
+      <label>专注分钟<input type="number" min={1} max={180} value={num("focus_minutes", 25)} onChange={(e) => setNum("focus_minutes", e.target.value)}/></label>
+      <label>短休分钟<input type="number" min={1} max={60} value={num("short_break_minutes", 5)} onChange={(e) => setNum("short_break_minutes", e.target.value)}/></label>
+    </div>
+    <div className="field-row">
+      <label>长休分钟<input type="number" min={1} max={120} value={num("long_break_minutes", 20)} onChange={(e) => setNum("long_break_minutes", e.target.value)}/></label>
+      <label>几轮后长休<input type="number" min={1} max={12} value={num("long_break_after", 4)} onChange={(e) => setNum("long_break_after", e.target.value)}/></label>
+    </div>
+    <p className="tt-hint">A 屏出阶段与剩余分钟，B 屏出今日番茄数与进度。开始 / 暂停 / 跳过在手机端操作——墨水屏不做秒级倒计时，所以屏上不放按钮。</p>
+  </div>;
+}
 
 function ScreenForm({ kind, sceneKey, value, onChange }: { kind: "a"|"b"; sceneKey: SceneKey; value: ScreenConfig; onChange: (p: Partial<ScreenConfig>) => void }) {
   const [pubApps, setPubApps] = useState<{ app_id: string; name: string; description: string; scene: string; preview_url: string }[]>([]);
@@ -1169,6 +1217,7 @@ function ScreenForm({ kind, sceneKey, value, onChange }: { kind: "a"|"b"; sceneK
         )}
       </div>
     ) : null}
+    {value.mode === "pomodoro" ? <PomodoroConfig value={value.preset} onChange={(preset) => onChange({ preset })}/> : null}
     {sceneKey === "family" && <p className="tt-hint">家庭提醒由所选模式决定读取的内容，来源标签自动对应「内容管理」中的相应数据，不能手动选成其他来源；家庭日程在「内容管理 → 家庭日程」维护。{value.mode === "family-weather" ? "城市在 dual「个人中心 → 家庭与设备位置」设置；此处会请求实时天气，设备刷新时也使用同一城市。" : ""}</p>}
     <div className="field-row"><label>数据来源{sceneKey === "family" ? <input value={familySource(value.mode || modes[0].key)} readOnly /> : <select value={value.source} onChange={(e) => onChange({ source: e.target.value })}>{[value.source, ...sourceOptions.filter((source) => source !== value.source)].map((source) => <option key={source} value={source}>{source}</option>)}</select>}</label><label>刷新频率<select value={value.refresh} onChange={(e) => onChange({ refresh: e.target.value })}>{[value.refresh, ...refreshOptions.filter((refresh) => refresh !== value.refresh)].map((refresh) => <option key={refresh} value={refresh}>{refresh}</option>)}</select></label></div>
     <div className="module-label"><span>内容模块</span><button onClick={() => { const preset = ["相册", "天气", "倒计时"].find((m) => !value.modules.includes(m)) || "新模块"; onChange({ modules: [...value.modules, preset] }); }}><Plus size={14}/>添加</button></div>
@@ -1176,7 +1225,7 @@ function ScreenForm({ kind, sceneKey, value, onChange }: { kind: "a"|"b"; sceneK
   </div>;
 }
 
-function ScreenPreview({ kind, sceneKey, scene, config, content, screen, weatherPreview, weatherLoading, weatherError }: { kind: "a"|"b"; sceneKey: SceneKey; scene: string; config: ScreenConfig; content: ContentState; screen: { size: "4.2" | "5.83"; colors: 2 | 3 | 4 }; weatherPreview?: DualWeatherPreview | null; weatherLoading?: boolean; weatherError?: string }) {
+function ScreenPreview({ kind, sceneKey, scene, config, content, screen, deviceMac, weatherPreview, weatherLoading, weatherError }: { kind: "a"|"b"; sceneKey: SceneKey; scene: string; config: ScreenConfig; content: ContentState; screen: { size: "4.2" | "5.83"; colors: 2 | 3 | 4 }; deviceMac?: string; weatherPreview?: DualWeatherPreview | null; weatherLoading?: boolean; weatherError?: string }) {
   const dims = screen.size === "5.83" ? "648 × 480" : "400 × 300";
   let body: React.ReactNode;
   if (sceneKey === "study" && kind === "a") {
@@ -1221,6 +1270,12 @@ function ScreenPreview({ kind, sceneKey, scene, config, content, screen, weather
   } else if (sceneKey === "family" && kind === "b") {
     const isAlbum = config.mode === "album";
     body = isAlbum ? <AlbumPreview album={content.album} /> : <FamilyWeekScreen content={content} />;
+  } else if (config.mode === "pomodoro") {
+    // 番茄钟按设备真实会话出图，前端不复刻版式——这样预览和屏上永远一致。
+    const persona = kind === "a" ? "DUAL_A" : "DUAL_B";
+    const colors = kind === "b" ? screen.colors : 2;
+    body = <div className="kline-full"><img className="kline-full-img" alt="专注番茄"
+      src={`${BASE_PATH}/api/preview?persona=${persona}&w=400&h=300&colors=${colors}&sceneKey=${encodeURIComponent(sceneKey)}&aMode=pomodoro&bMode=pomodoro&mac=${encodeURIComponent(deviceMac || "")}&v=pomodoro`} /></div>;
   } else if (sceneKey === "office") {
     body = <SceneModePreview title={config.title} modules={config.modules} note="办公场景" />;
   } else {

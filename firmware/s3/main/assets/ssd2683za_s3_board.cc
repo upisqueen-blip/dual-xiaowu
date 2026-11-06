@@ -50,6 +50,7 @@ private:
     uint8_t* color_bw_ = nullptr;   // 15000 字节，1=白
     uint8_t* color_red_ = nullptr;  // 15000 字节，1=红
     TaskHandle_t color_refresh_task_ = nullptr;
+    TaskHandle_t heartbeat_task_ = nullptr;
 #endif
 
     // InkSight 今日看板：帧缓冲放在 PSRAM，15KB；busy_ 防重复刷新。
@@ -300,6 +301,31 @@ private:
         }
     }
 #endif
+
+    static void HeartbeatTask(void* argument) {
+        auto* self = static_cast<Ssd2683zaS3Board*>(argument);
+        vTaskDelay(pdMS_TO_TICKS(15000));
+        while (true) {
+            vTaskDelay(pdMS_TO_TICKS(10000));
+            if (!self->GetNetwork() || self->inksight_server_.empty()) continue;
+            bool refresh_required = false;
+            std::string error;
+            const bool ok = InkSightClient::ReportRuntimeMode(
+                self->GetNetwork(), self->inksight_server_,
+                SystemInfo::GetMacAddress(), true, true, &error,
+                &refresh_required);
+            if (!ok) {
+                ESP_LOGW(kTag, "InkSight heartbeat failed: %s", error.c_str());
+                continue;
+            }
+            ESP_LOGD(kTag, "InkSight heartbeat ok%s",
+                     refresh_required ? ", refresh requested" : "");
+            if (refresh_required && !self->display_->dashboard().IsConversation()) {
+                Application::GetInstance().Schedule(
+                    [self]() { self->RefreshInkSight(false); });
+            }
+        }
+    }
 
     // 执行一次 InkSight 拉取+解码+刷屏幕（应用 Schedule 回调中调用）。
     // initial_full_refresh=true: 首次进入用全刷；false: 按 OK 快刷（局部）。
@@ -1032,6 +1058,10 @@ public:
         }
 #endif
         InitializeButton();
+        if (xTaskCreate(HeartbeatTask, "inksight_heartbeat", 4096, this, 2,
+                        &heartbeat_task_) != pdPASS) {
+            ESP_LOGW(kTag, "Cannot create InkSight heartbeat task");
+        }
         storage_.Mount();  // Card absence must never prevent normal voice/display startup.
         InitializeDashboardTools();
         todo_web_ = std::make_unique<EpaperTodoWeb>([this](const char* kind) {
