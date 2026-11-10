@@ -346,7 +346,7 @@ export default function DualConsole() {
     try {
       await api(`/api/device/${encodeURIComponent(selectedDevice.mac)}/dual-config`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
       const colorLabel = screen.colors === 2 ? "黑白" : screen.colors === 3 ? "三色（黑白红）" : "四色（黑白红黄）";
-      notify(`已保存并下发：B 屏按${colorLabel}渲染（${selectedDevice.nickname || selectedDevice.mac}）`);
+      notify(`已保存并下发：B 屏按${colorLabel}渲染（${selectedDevice.nickname || selectedDevice.mac}），设备最迟 1 分钟内刷新，先 A 屏再 B 屏`);
     } catch (error) {
       const msg = error instanceof Error && error.message ? error.message : "网络错误";
       notify(`下发失败：${msg}（本地模式已保存）`);

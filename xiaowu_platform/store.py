@@ -761,6 +761,23 @@ class Store:
                 return was
         return False
 
+    def peek_pending_refresh(self, device_id: str) -> bool:
+        """只读地查待刷新标记，不清除。
+
+        用于设备的「运行模式上报」这类旁路请求：它必须知道后台有没有点「应用
+        到设备」，但又不能把标记消费掉 —— 一旦被它吃掉，随后真正取 A/B 图的
+        请求就拿不到 X-Pending-Refresh，设备只能干等 30 分钟周期，表现成
+        「点了应用没反应」。
+        """
+        with self.connect() as db:
+            for cand in _mac_candidates(device_id):
+                row = db.execute(
+                    "SELECT pending_refresh FROM devices WHERE device_id=?", (cand,)
+                ).fetchone()
+                if row:
+                    return bool(int(row["pending_refresh"]))
+        return False
+
     def save_content_config(self, device_id: str, payload: dict[str, Any]) -> str:
         ts = now_iso()
         with self.connect() as db:

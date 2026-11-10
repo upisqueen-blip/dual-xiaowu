@@ -1090,11 +1090,22 @@ def _render_xiaowu_today(cfg_root: dict, a_cfg: dict, w: int, h: int, colors: in
               fill=fg, width=1)
     tail = str(mac or "").replace(":", "").strip().upper()
     if len(tail) >= 4 and all(c in "0123456789ABCDEF" for c in tail):
-        draw.text((int(16 * s), h - int(19 * s)), f"尾号 {tail[-4:]}",
+        tail_text = f"尾号 {tail[-4:]}"
+        draw.text((int(16 * s), h - int(19 * s)), tail_text,
                   fill=fg, font=f_meta)
+    else:
+        tail_text = ""
     site = "xiaowuai.vip"
-    draw.text(((w - _text_w(draw, site, f_meta)) // 2, h - int(19 * s)),
-              site, fill=fg, font=f_meta)
+    site_w = _text_w(draw, site, f_meta)
+    site_x = (w - site_w) // 2
+    draw.text((site_x, h - int(19 * s)), site, fill=fg, font=f_meta)
+    # 更新时间：A 屏内容为空时前后两帧一模一样，刷了也看不出来（用户以为没刷），
+    # 这里挂一个「更新 15:36」，让每次刷新都有肉眼可见的变化，也方便排查到底刷没刷。
+    updated = f"更新 {now:%H:%M}"
+    upd_w = _text_w(draw, updated, f_meta)
+    upd_x = int(16 * s) + (_text_w(draw, tail_text, f_meta) + int(12 * s) if tail_text else 0)
+    if upd_x + upd_w < site_x - int(8 * s):
+        draw.text((upd_x, h - int(19 * s)), updated, fill=fg, font=f_meta)
     if battery is not None:
         _draw_battery_with_text(draw, w - int(16 * s), h - int(14 * s), s,
                                 battery, f_meta, fg)

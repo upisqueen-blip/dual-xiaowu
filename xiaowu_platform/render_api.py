@@ -38,6 +38,42 @@ from .settings import settings
 from .store import Store
 
 store = Store(settings.database_path)
+
+# 屏模式 → 中文标题。预览时前端只传模式 key（aMode/bMode），以前直接把 key 当
+# 标题塞进渲染配置，于是「小悟今日」的品牌行被渲染成 "xiaowu-today"（渲染器按
+# 8 字截断 → "xiaowu-t"），看起来像乱码。这里给已知模式一个正经名字。
+_MODE_TITLES = {
+    "xiaowu-today": "小悟今日",
+    "welcome": "欢迎页",
+    "notes": "便签",
+    "album": "相册",
+    "album-tf": "TF 卡相册",
+    "weather": "本地天气",
+    "homework": "今日作业",
+    "reading": "阅读任务",
+    "course": "课程表",
+    "calendar": "家庭日程",
+    "family": "家庭提醒",
+    "family-weather": "天气",
+    "family-express-bills": "快递与缴费",
+    "family-todos": "家庭待办",
+    "family-shopping": "采购清单",
+    "family-anniversary": "纪念日",
+    "finance-watch": "自选股行情",
+    "finance-market": "大盘全景",
+    "finance-reco": "推荐股",
+    "finance-portfolio": "资金管理看板",
+    "finance-gold": "黄金/期货",
+    "finance-trend": "行情趋势",
+    "finance-sectors": "板块动向",
+    "health": "今日健康提醒",
+    "health-medication": "用药与饮水",
+    "health-plan": "养生计划",
+    "health-sleep": "作息与睡眠",
+    "office": "工作信息",
+    "pomodoro": "专注番茄",
+    "dashboard": "总览",
+}
 router = APIRouter(tags=["render"])
 
 
@@ -310,8 +346,8 @@ def preview(
             "screen": {"size": "4.2", "colors": colors},
             "config": {
                 sk: {
-                    "a": {"mode": (aMode or default_a), "title": (aMode or "实时行情")},
-                    "b": {"mode": (bMode or default_b), "title": (bMode or "行情趋势")},
+                    "a": {"mode": (aMode or default_a)},
+                    "b": {"mode": (bMode or default_b)},
                 }
             },
         }
@@ -329,10 +365,20 @@ def preview(
                         src = base_scene.get(kind)
                         # 只沿用模块/城市/标题这类数据字段，mode 必须听覆盖参数。
                         if chosen and isinstance(src, dict):
+                            same_mode = str(src.get("mode") or "") == chosen
                             for key, value in src.items():
                                 if key == "mode":
                                     continue
+                                # 标题只在「预览的正是该屏已保存模式」时沿用，
+                                # 否则切到便签预览也会顶着「小悟今日」的标题。
+                                if key == "title" and not same_mode:
+                                    continue
                                 override_cfg["config"][sk][kind].setdefault(key, value)
+        # 兜底标题：已知模式给中文名，未知模式再退回模式 key（至少不再是截断的乱码）。
+        for kind in ("a", "b"):
+            entry = override_cfg["config"][sk][kind]
+            mode_key = str(entry.get("mode") or "")
+            entry.setdefault("title", _MODE_TITLES.get(mode_key, mode_key))
         try:
             if screen == "B":
                 img = render_dual_screen(mac_code, "B", w, h, colors, override_cfg)
