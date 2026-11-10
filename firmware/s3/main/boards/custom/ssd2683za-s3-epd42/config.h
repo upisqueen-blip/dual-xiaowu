@@ -67,7 +67,7 @@
 //
 // 双排座（docs/eda/Netlist_schematic_main_1_2026-09-15.net）：
 //   两个 24pin 座共享 DIN/CLK/DC/RST，CS 与 BUSY 独立：
-//     FPC1: CS2=GPIO39, BUSY2=GPIO40  -> 三色屏 UC1679/SSD1683（对话信息屏）
+//     FPC1: CS2=GPIO39, BUSY2=GPIO40  -> 黑白快刷屏 SSD1619（对话信息屏）
 //     FPC2: CS1=GPIO9,  BUSY1=GPIO12  -> 彩色屏（menuconfig 选 3-color SSD1683
 //                                      BWR 或 4-color SSD2683ZA BWRY；相册/InkSight）
 //   每路座子各配独立 GDR/RESE 升压泵（面板驱动芯片自管理，无需 MCU 控制）。
@@ -79,14 +79,9 @@
 #define EPD_DC_PIN    GPIO_NUM_10
 #define EPD_RST_PIN   GPIO_NUM_11
 
-// ---- FPC1：三色屏 UC1679/SSD1683（GetDisplay() 主屏，对话 + 学习信息）----
+// ---- FPC1：黑白快刷屏 SSD1619（GetDisplay() 主屏，对话 + 学习信息）----
 #define EPD_CS_PIN    GPIO_NUM_39
 #define EPD_BUSY_PIN  GPIO_NUM_40
-
-// A 屏已换成与 FPC2 相同的 B/W/R 三色面板，FPC1 使用 UC1679/SSD1683 驱动。
-#ifndef FPC1_COLOR_COUNT
-#define FPC1_COLOR_COUNT 3
-#endif
 
 // ---- FPC2：彩色图像屏（menuconfig 选 3-color SSD1683 BWR 或 4-color SSD2683ZA
 //      BWRY；相册 / InkSight，驱动随 FPC2_PANEL_COLORS 切换）----
@@ -104,30 +99,20 @@
 // 三张图肉眼有变化 → 驱动链路正常；完全没有变化 → 面板没有驱动电压。
 // 出厂量产固件必须改回 0。
 #ifndef EPD_BOOT_SELFTEST
-// 2026-11-06 现场排查：A 屏日志报「波形跑满 3990 ms + Full refresh complete」，
-// 玻璃上却一个月前的行情页一动不动。软件侧已经证伪（帧内容、BUSY 翻转、
-// 帧字节数都对），只剩「全刷 0x26 旧平面该写同相还是反相」没定论。
-// 临时置 1 烧一版，看四张纯色图会不会变；确认后必须改回 0。
-#define EPD_BOOT_SELFTEST 0
+#define EPD_BOOT_SELFTEST 0  // 面板链路已验证，关闭开机自检（省约 30 秒启动时间）
 #endif
 
-// 5.83" 双屏（UC8179）上电自检。
-// 2026-11-06 换成汉朔拆机 5.83" 面板（A=黑白 WF0583?Z09，B=三色 FPC-8601B），
-// 两颗都是 UC8179、命令集与旧 SSD1619/SSD1683 完全不兼容。为了一次烧录判定
-// 「到底是不是 UC8179、CS/BUSY 座子对不对、红平面极性是哪一种」，置 1 时
-// 固件只跑自检：A 屏连刷 4 张黑白图案，B 屏连刷 3 张三色图案，然后驻留不再
-// 启动应用（屏幕不会被首页覆盖，便于现场判读）。判定完成后必须改回 0。
-#ifndef EPD_BRINGUP_TEST
-#define EPD_BRINGUP_TEST 1
-#endif
-
-// 全刷时 0x26（旧画面参考平面）写什么：
-//   0 = 与 0x24 写同一份数据（参考例程做法，适用于绝对驱动波形）
-//   1 = 写新画面的反相（适用于差分驱动波形：只驱动 0x24≠0x26 的像素）
-// 判断依据：把 EPD_BOOT_SELFTEST 置 1，看后两张【0x26 反相】的图有没有出墨。
-// 出来了就改成 1；四张都不出来，说明和 0x26 无关，别动这个数。
-#ifndef EPD_INVERT_OLD_PLANE
-#define EPD_INVERT_OLD_PLANE 1
+// A 屏（FPC1 / 4.2" 黑白快刷 SSD1619）纯定时自证：1 = 开机先做一次
+// 「不看 BUSY」的三张图测试（全黑 / 全白 / 上黑下白，每张 10 秒），并把
+// BUSY 电平逐 500 ms 打出来。用来一次性分开三件事：
+//   ① BUSY 线是浮空还是被面板驱动
+//   ② 复位后 BUSY 有没有动
+//   ③ 玻璃上到底出不出墨
+// 出厂必须改回 0。诊断完就关：探针每张图占 10 秒，开机白白多等 30 秒，
+// 而且它会把 panel_frame_ 写脏（旧画面取反），影响紧随其后的首帧刷新。
+// 需要再测时用 build 参数 -DEPD_A42_PROBE_TEST=1 打开即可，不必改这个文件。
+#ifndef EPD_A42_PROBE_TEST
+#define EPD_A42_PROBE_TEST 0
 #endif
 
 // 双屏配置开关：1 = FPC1 快刷屏 + FPC2 SSD2683ZA 四色屏同时驱动；

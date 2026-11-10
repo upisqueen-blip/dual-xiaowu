@@ -13,12 +13,9 @@
 #include "esp_lvgl_port.h"
 #include "epaper_bus_lock.h"
 
-#if EPD_ENABLE_COLOR_SCREEN || FPC1_COLOR_COUNT == 3
-#include "uc1679_display.h"
-#endif
-
 #if EPD_ENABLE_COLOR_SCREEN
 #include "ssd2683za_color_panel.h"
+#include "uc1679_display.h"
 #endif
 
 #if !CONFIG_EPD_PANEL_UC8253_37
@@ -69,19 +66,7 @@ constexpr uint8_t kPartialLut[70] = {
 
 Ssd1619Display::Ssd1619Display()
     : LcdDisplay(nullptr, nullptr, DISPLAY_WIDTH, DISPLAY_HEIGHT) {
-    // 全刷 0x26 旧平面的写法，由 config.h 的 EPD_INVERT_OLD_PLANE 决定。
-    invert_old_plane_ = (EPD_INVERT_OLD_PLANE != 0);
-#if FPC1_COLOR_COUNT != 3
     InitializeSpi();
-#endif
-#if FPC1_COLOR_COUNT == 3
-    static_assert(FPC1_WIDTH == FPC2_WIDTH && FPC1_HEIGHT == FPC2_HEIGHT,
-                  "FPC1 and FPC2 three-color drivers currently require equal panel sizes");
-    fpc1_color_driver_ =
-        new Uc1679Display(EPD_CS_PIN_FPC1, EPD_BUSY_PIN_FPC1);
-#else
-    InitializeSpi();
-#endif
     mutex_ = xSemaphoreCreateMutex();
     frame_ = static_cast<uint8_t*>(heap_caps_malloc(kFrameBytes, MALLOC_CAP_SPIRAM));
     tx_frame_ = static_cast<uint8_t*>(heap_caps_malloc(kFrameBytes, MALLOC_CAP_SPIRAM));
@@ -134,10 +119,131 @@ void Ssd1619Display::ShowBootHome() {
     dashboard_.Show(EpaperDashboard::Page::kWelcome);
 }
 
+void Ssd1619Display::RunPanelProbe() {
+#if EPD_A42_PROBE_TEST
+    // 这块面板走的是"完全不信 BUSY"的路线：现有驱动逻辑里，只要
+    // IsBusyLineDriven() 判出 BUSY 浮空，WaitRefreshComplete() 就会直接
+    // 返回 false，于是每次刷新都被判失败、重试、翻转极性、最后锁存 30 s。
+    // 结果就是"面板可能能刷，但驱动一次都没让它刷完"。
+    // 本测试刻意不看 BUSY：初始化、写 RAM、触发波形全靠固定延时，
+    // 唯一的判据是肉眼和 BUSY 采样轨迹。
+    EpaperBusGuard bus_guard;
+    ESP_LOGW(kTag, "===== A 屏（FPC1）SSD1619 纯定时自证：全程不依赖 BUSY =====");
+    ESP_LOGW(kTag, "CS=GPIO%d DC=GPIO%d RST=GPIO%d BUSY=GPIO%d  配置忙电平=%d（空闲应为 %d）",
+             EPD_CS_PIN, EPD_DC_PIN, EPD_RST_PIN, EPD_BUSY_PIN, EPD_BUSY_LEVEL,
+             EPD_BUSY_LEVEL ? 0 : 1);
+
+    // ① BUSY 这条线上有没有东西在驱动
+    gpio_config_t cfg = {};
+    cfg.pin_bit_mask = 1ULL << EPD_BUSY_PIN;
+    cfg.mode = GPIO_MODE_INPUT;
+    cfg.pull_up_en = GPIO_PULLUP_ENABLE;
+    cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    gpio_config(&cfg);
+    vTaskDelay(pdMS_TO_TICKS(5));
+    const int busy_up = gpio_get_level(EPD_BUSY_PIN);
+    cfg.pull_up_en = GPIO_PULLUP_DISABLE;
+    cfg.pull_down_en = GPIO_PULLDOWN_ENABLE;
+    gpio_config(&cfg);
+    vTaskDelay(pdMS_TO_TICKS(5));
+    const int busy_down = gpio_get_level(EPD_BUSY_PIN);
+    cfg.pull_up_en = GPIO_PULLUP_ENABLE;
+    cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    gpio_config(&cfg);
+    ESP_LOGW(kTag, "① BUSY 上拉读=%d 下拉读=%d → %s", busy_up, busy_down,
+             busy_up == busy_down ? "被面板驱动（这条线是通的）"
+                                   : "浮空（面板没有驱动这条线：没插实 / 该脚是 NC）");
+
+    // ② 复位瞬间 BUSY 有没有掉到忙电平
+    const int before = gpio_get_level(EPD_BUSY_PIN);
+    HardwareReset();
+    int low_at = -1;
+    for (int i = 0; i < 40; ++i) {  // 2 s
+        if (gpio_get_level(EPD_BUSY_PIN) == 0 && low_at < 0) low_at = i * 50;
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    ESP_LOGW(kTag, "② 复位前 BUSY=%d；复位后 2 s 内%s", before,
+             low_at >= 0 ? "出现过低电平（面板有回应复位）"
+                         : "一直是高电平（面板对复位没有反应）");
+
+    // ③ 三张图，纯定时
+    auto fill_frame = [this](int kind) {
+        for (int y = 0; y < DISPLAY_HEIGHT; ++y) {
+            uint8_t value = 0xff;
+            if (kind == 0) {
+                value = 0x00;  // 全黑
+            } else if (kind == 1) {
+                value = 0xff;  // 全白
+            } else {
+                value = (y < DISPLAY_HEIGHT / 2) ? 0x00 : 0xff;  // 上黑下白
+            }
+            std::memset(frame_ + static_cast<size_t>(y) * kStride, value,
+                        kStride);
+        }
+    };
+
+    auto probe_one = [this](const char* name) {
+        HardwareReset();
+        vTaskDelay(pdMS_TO_TICKS(30));
+        const uint8_t driver_output[] = {0x2b, 0x01, 0x00};
+        Command(0x01, driver_output, sizeof(driver_output));
+        const uint8_t booster[] = {0xd7, 0xd6, 0x9d};
+        Command(0x0c, booster, sizeof(booster));
+        const uint8_t temperature = 0x80;
+        Command(0x18, &temperature, 1);
+        const uint8_t entry_mode = 0x03;
+        Command(0x11, &entry_mode, 1);
+        const uint8_t border = 0x05;
+        Command(0x3c, &border, 1);
+        const uint8_t display_update[] = {0x40, 0x00};
+        Command(0x21, display_update, sizeof(display_update));
+        SetRamWindow();
+        const uint8_t power_on = 0xc0;
+        Command(0x22, &power_on, 1);
+        Command(0x20);
+        vTaskDelay(pdMS_TO_TICKS(500));
+
+        SetRamWindow();
+        Command(0x24);  // 新画面
+        Data(frame_, kFrameBytes);
+        for (size_t i = 0; i < kFrameBytes; ++i) {
+            panel_frame_[i] = static_cast<uint8_t>(~frame_[i]);  // 旧画面取反
+        }
+        SetRamWindow();
+        Command(0x26);  // 旧画面：与新的逐像素相反 → 每个像素都判为变化
+        Data(panel_frame_, kFrameBytes);
+        const uint8_t update = 0xf7;
+        Command(0x22, &update, 1);
+        Command(0x20);
+
+        char trace[40] = {0};
+        int toggles = 0;
+        int prev = gpio_get_level(EPD_BUSY_PIN);
+        for (int i = 0; i < 20; ++i) {  // 10 s，每 500 ms 一个采样点
+            vTaskDelay(pdMS_TO_TICKS(500));
+            const int level = gpio_get_level(EPD_BUSY_PIN);
+            if (level != prev) {
+                ++toggles;
+                prev = level;
+            }
+            trace[i] = level ? '1' : '0';
+        }
+        ESP_LOGW(kTag, "③ [%s] 10 s BUSY 采样=%s 跳变=%d 次", name, trace,
+                 toggles);
+    };
+
+    fill_frame(0);
+    probe_one("全黑");
+    fill_frame(1);
+    probe_one("全白");
+    fill_frame(2);
+    probe_one("上黑下白");
+    ESP_LOGW(kTag, "===== 自证结束：请如实回答屏幕有无变化（有/无、哪一张、什么方向）=====");
+#endif
+}
+
 Ssd1619Display::~Ssd1619Display() {
     if (refresh_task_) vTaskDelete(refresh_task_);
-    delete fpc1_color_driver_;
-    fpc1_color_driver_ = nullptr;
     if (spi_) spi_bus_remove_device(spi_);
     if (mutex_) vSemaphoreDelete(mutex_);
     heap_caps_free(frame_);
@@ -216,47 +322,14 @@ void Ssd1619Display::ShowNotification(const char* notification,
 }
 
 void Ssd1619Display::ShowActivationUi(const char* message, const char* code) {
-    activation_message_ = message ? message : "";
-    xiaozhi_activation_code_ = code ? code : "";
-    dashboard_.ShowActivation(activation_message_, xiaozhi_activation_code_,
-                              xiaowu_pair_code_);
+    dashboard_.ShowActivation(message ? message : "", code ? code : "");
 }
 
 void Ssd1619Display::ShowProvisioningGuide(const char* ssid, const char* url) {
     dashboard_.ShowProvisioning(ssid ? ssid : "", url ? url : "");
 }
 
-void Ssd1619Display::SetXiaowuPairCode(const char* code) {
-    xiaowu_pair_code_ = code ? code : "";
-    if (activation_message_.empty()) {
-        activation_message_ =
-            "小悟后台绑定码用于绑定设备，打开 dualcn.xiaowuai.vip 输入。\n\n"
-            "小智后台激活码用于启用对话，打开 xiaozhi.me 输入。";
-    }
-    dashboard_.ShowActivation(activation_message_, xiaozhi_activation_code_,
-                              xiaowu_pair_code_);
-    // 现场排查用：绑定码为空时页面会切过去但只剩正文（白底黑字在这块屏上
-    // 几乎不出墨），看起来就像"没切页"。把两个码都打出来，一眼能区分
-    // 「没切页」和「切了但码是空的」。
-    ESP_LOGI(kTag,
-             "A 屏请求切到绑定码页: 小悟码=[%s] 小智码=[%s] 正文=%u 字",
-             xiaowu_pair_code_.empty() ? "空" : xiaowu_pair_code_.c_str(),
-             xiaozhi_activation_code_.empty() ? "空"
-                                              : xiaozhi_activation_code_.c_str(),
-             static_cast<unsigned>(activation_message_.size()));
-}
-
-void Ssd1619Display::HideActivationUi() {
-    if (xiaowu_pair_code_.empty()) {
-        dashboard_.HideActivation();
-        return;
-    }
-    activation_message_ =
-        "小智后台已完成激活。\n\n"
-        "小悟设备绑定请打开 dualcn.xiaowuai.vip 输入下方设备绑定码。";
-    xiaozhi_activation_code_.clear();
-    dashboard_.ShowActivation(activation_message_, "", xiaowu_pair_code_);
-}
+void Ssd1619Display::HideActivationUi() { dashboard_.HideActivation(); }
 
 void Ssd1619Display::InitializeSpi() {
     // 两个座的 CS 都初始化为输出并拉高（未选中）。没用到的那个座保持不被选中，
@@ -298,14 +371,6 @@ void Ssd1619Display::InitializeSpi() {
     device.spics_io_num = -1;
     device.queue_size = 2;
     ESP_ERROR_CHECK(spi_bus_add_device(EPD_SPI_NUM, &device, &spi_));
-#if FPC1_COLOR_COUNT == 3
-    ESP_LOGI(kTag,
-             "FPC1 三色 UC1679/SSD1683 ready: %dx%d, frame=%u bytes, "
-             "CS=GPIO%d BUSY=GPIO%d (DIN=GPIO%d CLK=GPIO%d DC=GPIO%d RST=GPIO%d)",
-             DISPLAY_WIDTH, DISPLAY_HEIGHT, static_cast<unsigned>(kFrameBytes),
-             EPD_CS_PIN_FPC1, EPD_BUSY_PIN_FPC1,
-             EPD_MOSI_PIN, EPD_SCK_PIN, EPD_DC_PIN, EPD_RST_PIN);
-#else
     ESP_LOGI(kTag,
              "SSD1619 ready: %dx%d, frame=%u bytes, %s 座 "
              "(DIN=GPIO%d CLK=GPIO%d CS=GPIO%d DC=GPIO%d RST=GPIO%d "
@@ -314,14 +379,9 @@ void Ssd1619Display::InitializeSpi() {
              "FPC1",
              EPD_MOSI_PIN, EPD_SCK_PIN, cs_pin_, EPD_DC_PIN, EPD_RST_PIN,
              busy_pin_, EPD_BUSY_LEVEL);
-#endif
 }
 
 void Ssd1619Display::HardwareReset() {
-#if FPC1_COLOR_COUNT == 3
-    // FPC1 三色屏由 Uc1679Display 管理复位；避免走旧 SSD1619 的复位流程。
-    return;
-#else
 #if EPD_ENABLE_COLOR_SCREEN
     // FPC2 彩色屏正在全刷时（~16s），共享 RST 会打断其波形，须等待完成。
     // 驱动随 FPC2_PANEL_COLORS 切换（3-color→SSD1683，4-color→SSD2683ZA）。
@@ -354,23 +414,9 @@ void Ssd1619Display::HardwareReset() {
     }
     gpio_set_level(EPD_RST_PIN, 1);
     vTaskDelay(pdMS_TO_TICKS(20));
-#endif
 }
 
 bool Ssd1619Display::WaitBusy(uint32_t timeout_ms) {
-    // FPC1 的 BUSY 线有些装配/转接板没有引出，GPIO40 会呈现浮空。此时不能
-    // 把恒定电平当成控制器仍忙并因此拒绝所有首帧；SSD1619 的 SPI 命令仍可
-    // 正常发送，使用保守的固定等待完成复位/模拟电源启动，再由全刷阶段按
-    // 完整波形时长等待。DetectPanelConnector() 已在初始化前记录此状态。
-    if (!busy_driven_) {
-        constexpr uint32_t kBusylessSettleMs = 250;
-        const uint32_t settle_ms = std::min(timeout_ms, kBusylessSettleMs);
-        ESP_LOGW(kTag,
-                 "FPC1 BUSY(GPIO%d) 不可观测，按固定 %lu ms 等待控制器稳定",
-                 busy_pin_, static_cast<unsigned long>(settle_ms));
-        if (settle_ms > 0) vTaskDelay(pdMS_TO_TICKS(settle_ms));
-        return true;
-    }
     const TickType_t start = xTaskGetTickCount();
     const int idle_level = busy_idle_level_ >= 0
                                ? busy_idle_level_
@@ -389,26 +435,17 @@ bool Ssd1619Display::WaitBusy(uint32_t timeout_ms) {
 
 bool Ssd1619Display::WaitRefreshComplete(int idle_level, uint32_t timeout_ms,
                                          uint32_t busyless_total_ms) {
-    // GPIO40 被上下拉测试确认浮空时，电平既不能表示 idle，也不能表示 busy。
-    // 直接按全刷/快刷的保守波形时长等待，避免误报超时后复位正在工作的面板。
-    if (!busy_driven_ && busyless_total_ms != 0) {
-        ESP_LOGW(kTag,
-                 "FPC1 BUSY(GPIO%d) 不可观测，忽略电平并按 %lu ms 等待波形",
-                 busy_pin_, static_cast<unsigned long>(busyless_total_ms));
-        vTaskDelay(pdMS_TO_TICKS(busyless_total_ms));
-        return true;
-    }
     // Some SSD1619 carrier boards expose BUSY directly, while others invert it.
     // Use the level immediately before 0x20 as idle and require a complete
     // idle -> busy -> idle transition instead of assuming a fixed polarity.
-    // 真的在跑波形的面板，0x20 之后几十毫秒内就会拉忙。窗口保持
-    // kBusyAssertTimeoutMs：放宽到几百毫秒会让"拉忙慢一点"的刷新误入下面的
-    // 定时兜底分支，兜底只按时间返回、不校验画面，属于掩盖问题。
-    const uint32_t assert_window = kBusyAssertTimeoutMs;
     const TickType_t assert_start = xTaskGetTickCount();
+    // BUSY 已确认浮空：等不到「离开空闲」是必然的，别白等 3 秒断言窗口，
+    // 直接进下面按固定时长兜底的分支。
+    const uint32_t assert_window_ms =
+        (!busy_driven_ && busyless_total_ms != 0) ? 0 : kBusyAssertTimeoutMs;
     while (gpio_get_level(busy_pin_) == idle_level) {
         if ((xTaskGetTickCount() - assert_start) * portTICK_PERIOD_MS >=
-            assert_window) {
+            assert_window_ms) {
             // A number of otherwise compatible 24-pin panels do not route
             // BUSY (or expose an open-drain BUSY that this carrier cannot
             // observe).  The old code immediately reset the controller here.
@@ -419,21 +456,24 @@ bool Ssd1619Display::WaitRefreshComplete(int idle_level, uint32_t timeout_ms,
                 const uint32_t elapsed =
                     (xTaskGetTickCount() - assert_start) * portTICK_PERIOD_MS;
                 ESP_LOGW(kTag,
-                         "BUSY 在 0x20 后始终停空闲电平 %d（CS=GPIO%d BUSY=GPIO%d，"
-                         "线路被面板驱动=%s）→ 等待 %lu ms 后再按可观测性判定",
+                         "SSD1619 BUSY stayed at idle level %d after 0x20 "
+                         "(CS=GPIO%d BUSY=GPIO%d); using %lu ms timed "
+                         "completion instead of resetting the panel",
                          idle_level, cs_pin_, busy_pin_,
-                         busy_driven_ ? "是" : "否",
                          static_cast<unsigned long>(busyless_total_ms));
                 if (elapsed < busyless_total_ms) {
                     vTaskDelay(pdMS_TO_TICKS(busyless_total_ms - elapsed));
                 }
-                // 只有确认 BUSY 不可观测时，固定等待才可作为兼容路径。若线路有
-                // 驱动却没有观察到刷新波形，等待结束不能证明面板工作，必须报失败。
-                if (busy_driven_) {
-                    ESP_LOGE(kTag,
-                             "固定等待结束但 FPC1 BUSY 线路有驱动、未观察到波形；"
-                             "本次刷新判失败");
-                    return false;
+                // BUSY 线未被面板驱动（浮空/该座没引 BUSY）时，以前这里返回失败，
+                // 上层会复位重试 → 翻转极性 → 最后锁存，结果是"面板能刷，但驱动
+                // 一次都没让它刷完"，屏幕永远停在开机欢迎页。波形已经按固定时长
+                // 跑完，就应当算这一次刷新完成；排线问题用日志提示，不再靠锁屏表达。
+                if (!busy_driven_) {
+                    ESP_LOGW(kTag,
+                             "BUSY 未被面板驱动（CS=GPIO%d BUSY=GPIO%d 浮空），"
+                             "本次按 %lu ms 定时判定完成；若画面仍无变化请检查 FPC1 排线",
+                             cs_pin_, busy_pin_,
+                             static_cast<unsigned long>(busyless_total_ms));
                 }
                 return true;
             }
@@ -458,14 +498,6 @@ bool Ssd1619Display::WaitRefreshComplete(int idle_level, uint32_t timeout_ms,
         }
         vTaskDelay(pdMS_TO_TICKS(10));
     }
-    // 把「真的跑过波形」这件事留成可核查的证据：拉忙的延迟 + 忙态持续时长。
-    // 下一次现场日志里，这两行有值 = 面板在执行命令；没有这两行却报
-    // "Full refresh complete" = 靠定时兜底蒙过去的，画面不一定会变。
-    ESP_LOGI(kTag, "BUSY 波形实跑：拉忙延迟 %lu ms，忙态持续 %lu ms",
-             static_cast<unsigned long>(
-                 (release_start - assert_start) * portTICK_PERIOD_MS),
-             static_cast<unsigned long>(
-                 (xTaskGetTickCount() - release_start) * portTICK_PERIOD_MS));
     return true;
 }
 
@@ -625,23 +657,8 @@ int Ssd1619Display::DetectBusyIdleLevel() {
     if (busy_stuck_) return gpio_get_level(busy_pin_);
 
     const int cfg_idle = EPD_BUSY_LEVEL ? 0 : 1;
-
-    // 复位刚结束时 BUSY 可能仍停在忙电平，先给它落定的时间。
-    vTaskDelay(pdMS_TO_TICKS(120));
-
-    // 按配置极性主动等它落到空闲，最多 5 s。
-    //
-    // 窗口必须够长：上一次现场日志里，开机自检把采样提前到 1.1 s，面板还在
-    // 上电复位的忙态里，1 s 窗口内电平一次都没变，就被旧逻辑判成"极性相反"，
-    // 于是整轮初始化都在 idle=1 上跑——每次刷新的 0x20 都发在面板正忙的时候
-    // （直接被忽略），日志里全是"按 12000 ms 定时完成本次波形"。四张纯色图
-    // 因此全都不出墨，看起来像面板坏了，其实是被自己的极性判定坑了。
-    //
-    // 所以：等不到就**采信配置**，绝不反相。真判反了下面 Refresh() 还有一次
-    // 翻转重试兜底，不必在这里赌。
     int run = 0;
-    const TickType_t t0 = xTaskGetTickCount();
-    while ((xTaskGetTickCount() - t0) * portTICK_PERIOD_MS < 5000) {
+    for (int i = 0; i < 100; ++i) {  // 最多 100 * 10 ms = 1 s
         if (gpio_get_level(busy_pin_) == cfg_idle) {
             if (++run >= 5) {  // 连续 5 次（约 50 ms）稳定在空闲才算数
                 ESP_LOGI(kTag, "BUSY 空闲电平采样: %d（按配置极性，连续 %d 次稳定）",
@@ -654,14 +671,17 @@ int Ssd1619Display::DetectBusyIdleLevel() {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 
+    // 一秒都没等到配置推导的空闲电平：要么是面板一直忙（故障），要么是转接
+    // 板把 BUSY 反相了（本文件早有注释提到 FPC 转接板可能反相）。采信当前
+    // 实测电平；若真是故障，后面还有 Refresh() 里的翻转重试兜底。
+    const int observed = gpio_get_level(busy_pin_);
     ESP_LOGW(kTag,
-             "5 s 内 BUSY 未落到配置空闲 %d（当前 %d），仍按配置极性继续；"
-             "若确实判反，Refresh() 会翻转一次重试",
-             cfg_idle, gpio_get_level(busy_pin_));
-    return cfg_idle;
+             "BUSY 未按配置极性回到空闲(%d)，实测电平 %d；按反相处理",
+             cfg_idle, observed);
+    return observed;
 }
 
-bool Ssd1619Display::InitializePanel() {
+void Ssd1619Display::InitializePanel() {
     HardwareReset();
     // 先确认屏到底插在哪个座：这一条必须在采样极性之前做。断定"没有面板"或
     // 已在某座定位到面板之前，后面所有"等空闲 / 翻转极性 / 等 idle->busy->idle"
@@ -691,14 +711,17 @@ bool Ssd1619Display::InitializePanel() {
     }
     Command(0x12);  // SWRESET
     vTaskDelay(pdMS_TO_TICKS(20));
-    // 信任板级配置的 BUSY 极性。若 SWRESET 后仍未回到空闲，不能自动把
-    // 正在工作的高电平改判为空闲，否则全刷会被判成"未启动"。
-    if (!WaitBusy(10000)) {
-        ESP_LOGE(kTag, "SWRESET 后 BUSY 未回到配置的空闲电平 %d",
+    // 自校验：SWRESET 一定会让面板先忙、后回到空闲。若等不到空闲，说明上面
+    // 采到的"空闲电平"其实是忙电平（极性判反），翻转后再复位重试一次。
+    // 这里用 1 秒短超时——默认 10 秒一旦判反会把启动整整卡住 10 秒。
+    if (!WaitBusy(1000)) {
+        busy_idle_level_ = busy_idle_level_ ? 0 : 1;
+        ESP_LOGW(kTag, "SWRESET 后等不到空闲电平，翻转 BUSY 极性为 %d 并重试",
                  busy_idle_level_);
-        busy_stuck_ = true;
-        MarkPanelFaulted();
-        return false;
+        HardwareReset();
+        Command(0x12);
+        vTaskDelay(pdMS_TO_TICKS(20));
+        WaitBusy(1000);
     }
 
     // Do not depend on OTP/power-on defaults. A controller can acknowledge
@@ -711,10 +734,6 @@ bool Ssd1619Display::InitializePanel() {
     // SSD1619 4.2-inch reference booster soft-start values.
     const uint8_t booster[] = {0xd7, 0xd6, 0x9d};
     Command(0x0c, booster, sizeof(booster));
-
-    // 保留屏厂 OTP 校准的 Gate/Source/VCOM 电压。通用的 0x03/0x04/0x2C 数值
-    // 未针对当前 SSD1619 面板料号验证；它们可能让 BUSY 波形运行但墨水粒子不翻转。
-    ESP_LOGI(kTag, "使用屏体 OTP 电压校准（不覆盖 0x03/0x04/0x2C）");
 
     // Use the controller's internal temperature sensor for OTP waveform
     // compensation. Without this selection some modules never start a LUT.
@@ -737,7 +756,8 @@ bool Ssd1619Display::InitializePanel() {
     Command(0x22, &power_on, 1);
     Command(0x20);
     // 上电升压需要时间建立。仅在 20 ms 后读到空闲，可能是 BUSY 尚未拉起，
-    // 不能立即开始写 RAM；保守等待 150 ms 后再等待 BUSY 回到空闲。
+    // 不能立即开始写 RAM；保守等 150 ms 再等 BUSY 回到空闲（这段曾被删掉，
+    // 结果"升压到底有没有建立"完全不可见）。
     bool pon_busy_seen = false;
     const TickType_t pon_settle_start = xTaskGetTickCount();
     while ((xTaskGetTickCount() - pon_settle_start) * portTICK_PERIOD_MS < 150) {
@@ -755,10 +775,13 @@ bool Ssd1619Display::InitializePanel() {
     const uint32_t pon_ms =
         static_cast<uint32_t>((xTaskGetTickCount() - pon_start) * portTICK_PERIOD_MS);
     if (!pon_ok) {
-        ESP_LOGE(kTag, "模拟电源启动后 BUSY 未回到空闲电平 %d", busy_idle_level_);
-        busy_stuck_ = true;
-        MarkPanelFaulted();
-        return false;
+        // 只告警、不锁存、不 return。BUSY 极性判反或该脚浮空同样会让这里
+        // 超时，但那不代表屏坏；10 月版本在此处忽略返回值继续初始化，屏是
+        // 能出图的。改成 MarkPanelFaulted() 会把一次超时放大成「静默 30 s
+        // 且本轮彻底不刷新」，正是 A 屏毫无反应的另一半原因。
+        ESP_LOGE(kTag,
+                 "模拟电源启动后 BUSY 未回到空闲电平 %d，仍继续触发刷新",
+                 busy_idle_level_);
     }
     if (!busy_driven_) {
         ESP_LOGW(kTag,
@@ -777,7 +800,6 @@ bool Ssd1619Display::InitializePanel() {
     }
     panel_initialized_ = true;
     ESP_LOGI(kTag, "SSD1619 analogue power/init sequence complete");
-    return true;
 }
 
 void Ssd1619Display::MarkPanelFaulted() {
@@ -792,26 +814,6 @@ void Ssd1619Display::MarkPanelFaulted() {
 }
 
 void Ssd1619Display::Refresh(const uint8_t* data, bool partial) {
-#if FPC1_COLOR_COUNT == 3
-    // FPC1 已改为与 FPC2 相同的 B/W/R 三色面板。LVGL 和 dashboard 继续输出
-    // 1bpp 黑白帧；红色平面传 nullptr，由 UC1679 驱动补全为全白（无红色）。
-    // UC1679 自己持有共享总线锁，因此这里不能再创建 SSD1619 的 EpaperBusGuard。
-    if (fpc1_color_driver_ != nullptr) {
-        if (!fpc1_color_driver_->Available() && !fpc1_color_driver_->Init()) {
-            ESP_LOGE(kTag, "A 屏 FPC1 三色驱动初始化失败，帧未刷新");
-            return;
-        }
-        if (!fpc1_color_driver_->ShowFrame(data, nullptr)) {
-            ESP_LOGE(kTag, "A 屏 FPC1 三色全刷失败");
-            return;
-        }
-        std::memcpy(panel_frame_, data, kFrameBytes);
-        base_frame_valid_ = true;
-        ESP_LOGI(kTag, "A 屏 FPC1 三色全刷完成（黑白帧，无红色）partial 请求=%d",
-                 partial ? 1 : 0);
-        return;
-    }
-#endif
     // 与 FPC2(SSD2683ZA) 共享 SPI 总线/DC/RST：本函数可能从本类的
     // RefreshTask 或双屏刷新任务(RawFrameRefresh)并发调用，必须互斥。
     EpaperBusGuard bus_guard;
@@ -843,12 +845,6 @@ void Ssd1619Display::Refresh(const uint8_t* data, bool partial) {
         base_frame_valid_ = false;
     }
     if (RefreshOnce(data, partial)) return;
-    if (busy_stuck_) {
-        // 初始化时已确认 BUSY 没回配置空闲电平，避免立刻再复位一次并
-        // 延长配网提示的首屏时间；等退避窗口后再做一次硬件重探测。
-        MarkPanelFaulted();
-        return;
-    }
     // 第一次没生效：立刻硬复位整块面板再刷一次。偶发的 BUSY 采样抖动、SPI
     // 被抢占、上一帧波形残留都能这样救回来。旧实现是先锁存、静默 700 ms 再
     // 等下一次刷新请求——演示场景下"按了没反应"最致命，所以改成当场重试。
@@ -871,14 +867,12 @@ void Ssd1619Display::Refresh(const uint8_t* data, bool partial) {
         return;
     }
 
-    // 两次都无效：高度怀疑 BUSY 空闲电平判反。症状就是"0x20 之后 BUSY 纹丝
-    // 不动"，WaitRefreshComplete 走定时兜底、日志照样报成功、玻璃不动。
-    // 翻一次极性再赌最后一把——正常板子走不到这里，判反的板子能自愈。
-    //
-    // 上一轮把这段删掉是错的：DetectBusyIdleLevel 现在改成"采信配置"，
-    // 如果某块模块真的反相，就彻底没有补救路径了。
-    busy_idle_level_ = busy_idle_level_ ? 0 : 1;
-    ESP_LOGW(kTag, "两次刷新无效，翻转 BUSY 空闲电平为 %d 后重试最后一次",
+    // 两次都失败：高度怀疑 BUSY 空闲电平判反（症状就是"发 0x20 后 BUSY 纹丝
+    // 不动"）。翻转极性后再赌最后一次，让这类板子能自愈而不是直接锁存。
+    // 翻转后仍失败才真正判故障，正常板子不会走到这里。
+    busy_idle_level_ = busy_idle_level_ >= 0 ? (busy_idle_level_ ? 0 : 1)
+                                             : (EPD_BUSY_LEVEL ? 0 : 1);
+    ESP_LOGW(kTag, "BUSY 空闲电平疑似判反，翻转为 %d 后重试最后一次",
              busy_idle_level_);
     panel_initialized_ = false;
     partial_refresh_count_ = 0;
@@ -890,13 +884,14 @@ void Ssd1619Display::Refresh(const uint8_t* data, bool partial) {
         panel_faulted_at_ms_ = 0;
         return;
     }
-
+    // 到这里才是"这条 BUSY 线确实没有任何响应"的实锤：一次硬复位重试 + 一次
+    // 极性翻转都失败过。置位后进入长退避，避免每 700 ms 空转复位一次。
     busy_stuck_ = true;
     MarkPanelFaulted();
 }
 
 bool Ssd1619Display::RefreshOnce(const uint8_t* data, bool partial) {
-    if (!panel_initialized_ && !InitializePanel()) return false;
+    if (!panel_initialized_) InitializePanel();
     if (panel_faulted_) return false;
 
     if (partial) {
@@ -968,14 +963,9 @@ bool Ssd1619Display::RefreshOnce(const uint8_t* data, bool partial) {
     // complete analogue/controller setup before returning to a full waveform.
     if (partial_refresh_count_ != 0) {
         panel_initialized_ = false;
-        if (!InitializePanel()) return false;
+        InitializePanel();
+        if (panel_faulted_) return false;
     }
-
-    // 这里曾经额外补一条 0x04(Power ON)，想验证"面板是不是缺升压"。实测这条
-    // 是反效果：发完立刻读 BUSY 还是空闲（升压要几百毫秒才拉忙），WaitBusy
-    // 当场返回 0 ms，紧接着的 0x24 15 KB 数据正好灌在面板 power-on 序列中间，
-    // 波形改成 4.05 s 而画面依旧不动。init 里 0x22=0xC0 + 0x20 已经把模拟
-    // 电源拉起来了，全刷前不需要再补一次。
 
     // Restore the full-refresh settings after a partial update.
     const uint8_t full_border = 0x05;
@@ -985,40 +975,15 @@ bool Ssd1619Display::RefreshOnce(const uint8_t* data, bool partial) {
     SetRamWindow();
     Command(0x24);
     Data(data, kFrameBytes);
-    // 全刷写两个平面。0x26 是「旧画面参考平面」：
-    //   同相（写 data）—— 若 LUT 是绝对驱动，0x26 不参与，照常出图；
-    //                    若 LUT 是差分驱动，等于告诉控制器「整屏无变化」，
-    //                    波形照跑、BUSY 照翻转、日志照报成功，玻璃不动。
-    //   反相（写 ~data）—— 差分驱动下全屏都判为变化，全量出图；
-    //                    但绝对驱动下可能把 RED 平面点亮成整片红/脏屏。
-    // 这两种写法在实机上表现完全相反，且无法从日志区分，所以由
-    // invert_old_plane_ 交给现场自检去选，正常运行保持在 config 里选定的值。
-    ESP_LOGI(kTag, "全刷旧平面 0x26 使用%s数据",
-             invert_old_plane_ ? "反相（强制全屏变化）" : "同相");
+    // 0x26 是控制器的「旧画面」平面。这里必须写与 0x24 完全相同的帧——
+    // 这是 10 月版本在真机上稳定出图的写法（SSD1619 全刷 0xF7 对全部栅线
+    // 施加完整 OTP 波形，不按 0x26 做差分）。
+    // 曾经把它改成「新画面的反相」，理由是「让每个像素都判为变化」；结果
+    // 真机上 A 屏（FPC1）从此完全不更新，B 屏照常闪——即本次故障的根因。
     SetRamWindow();
     Command(0x26);
-    if (invert_old_plane_) {
-        for (size_t i = 0; i < kFrameBytes; ++i) {
-            panel_frame_[i] = static_cast<uint8_t>(~data[i]);
-        }
-        Data(panel_frame_, kFrameBytes);
-    } else {
-        Data(data, kFrameBytes);
-    }
+    Data(data, kFrameBytes);
     const uint8_t update = 0xf7;
-    if (self_test_pon_) {
-        // 诊断变体：在触发波形前用 0x22=0xC0 + 0x20 再走一遍完整的 power-on
-        // 序列，并把 BUSY 忙了多久打出来。忙了上百毫秒 = 升压真的建立了。
-        const uint8_t pon = 0xc0;
-        const TickType_t t0 = xTaskGetTickCount();
-        Command(0x22, &pon, 1);
-        Command(0x20);
-        const bool ok = WaitBusy(3000);
-        ESP_LOGW(kTag, "自检变体：强制 power-on %s，BUSY 忙了 %lu ms",
-                 ok ? "成功" : "超时",
-                 static_cast<unsigned long>(
-                     (xTaskGetTickCount() - t0) * portTICK_PERIOD_MS));
-    }
     // 同上：触发前先把 BUSY 排到空闲，避免 0x20 被忽略。
     WaitBusy(2000);
     Command(0x22, &update, 1);
@@ -1034,105 +999,11 @@ bool Ssd1619Display::RefreshOnce(const uint8_t* data, bool partial) {
     base_frame_valid_ = true;
     partial_refresh_count_ = 0;
     std::memcpy(panel_frame_, data, kFrameBytes);
-    if (busy_driven_) {
-        ESP_LOGI(kTag, "Full refresh wait complete (FPC1 BUSY line detected)");
-    } else {
-        ESP_LOGW(kTag,
-                 "全刷固定等待结束；BUSY(GPIO%d)不可观测，"
-                 "此日志不代表屏体已响应或画面已改变",
-                 busy_pin_);
-    }
+    ESP_LOGI(kTag, "Full refresh complete");
     return true;
 }
 
-void Ssd1619Display::RunPatternSelfTest() {
-    // 现场诊断：连刷三张纯色图。目的只有一个——把「面板/波形能不能让墨水动」
-    // 和「帧数据对不对」彻底分开。三张图肉眼可见地变化，说明 SSD1619 的
-    // 升压、时序、波形全都正常，问题只可能在上游取图/解码；三张都纹丝不动，
-    // 就是面板没有驱动电压，再怎么改软件也没用。
-    if (frame_ == nullptr || panel_frame_ == nullptr) {
-        ESP_LOGW(kTag, "自检跳过：帧缓冲未就绪");
-        return;
-    }
-    // 从冷状态开始：让第一张图触发一次「硬复位 + 完整初始化」，避免沿用
-    // 开机那一次可能已经脏掉的控制器状态。
-    panel_initialized_ = false;
-    panel_faulted_ = false;
-    base_frame_valid_ = false;
-    partial_refresh_count_ = 0;
-    ESP_LOGW(kTag, "=== A 屏纯色自检开始：四张图，每张约 4 s ===");
-    uint8_t* buf = static_cast<uint8_t*>(
-        heap_caps_malloc(kFrameBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    if (buf == nullptr) {
-        buf = static_cast<uint8_t*>(heap_caps_malloc(kFrameBytes, MALLOC_CAP_8BIT));
-    }
-    if (buf == nullptr) {
-        ESP_LOGW(kTag, "自检跳过：内存不足");
-        return;
-    }
-    // 前 3 张沿用现有初始化；第 4 张在 0x22/0x20 之前再强制走一遍
-    // power-on（0xC0 + 激活），用来单独排除「升压没建立」这条分支。
-    //
-    // 注意：这里曾经发的是裸 0x04，注释还写成 "Power ON"——错的。SSD1680/1619
-    // 家族 0x04 是 Source Driving Voltage Control（源极电压），不带参数发出去
-    // 只会让控制器停在等参数状态。真正打开升压的是 0x22 的 bit6(analog) + 0x20。
-    // 四张图 = 2×2 组合：{全黑, 全白} × {0x26 同相, 0x26 反相}。
-    // 只变一个变量，肉眼就能读出结论：
-    //   黑→白 有变化（前两张）  = 绝对驱动，0x26 不参与，同相可用；
-    //   白→黑 有变化（后两张）  = 差分驱动，必须写反相；
-    //   四张全都不变            = 面板没有驱动电压，与 0x26 无关，查硬件。
-    static const char* kNames[4] = {"全黑 · 0x26 同相", "全白 · 0x26 同相",
-                                    "全黑 · 0x26 反相", "全白 · 0x26 反相"};
-    for (int k = 0; k < 4; ++k) {
-        // 前两张同相（回到最初的写法），后两张反相（a94b9ab 的写法）。
-        invert_old_plane_ = (k >= 2);
-        // 全黑在前两张、全白在后两张：相邻两张一定是"黑↔白"，任何一次成功
-        // 翻转都会在玻璃上留下极其明显的变化，不会和残影混淆。
-        const uint8_t fill = (k % 2 == 0) ? 0x00 : 0xFF;
-        size_t black = 0;
-        for (size_t i = 0; i < kFrameBytes; ++i) {
-            buf[i] = fill;
-            if (fill != 0xFF) ++black;
-        }
-        const TickType_t t0 = xTaskGetTickCount();
-        Refresh(buf, /*partial=*/false);
-        const uint32_t elapsed_ms =
-            static_cast<uint32_t>((xTaskGetTickCount() - t0) * portTICK_PERIOD_MS);
-        ESP_LOGW(kTag,
-                 "自检 %d/4【%s】已下发：黑像素=%u/%u，耗时 %u ms，"
-                 "BUSY 当前=%d idle=%d，old_plane=%s",
-                 k + 1, kNames[k], static_cast<unsigned>(black),
-                 static_cast<unsigned>(kFrameBytes), static_cast<unsigned>(elapsed_ms),
-                 gpio_get_level(busy_pin_), busy_idle_level_,
-                 invert_old_plane_ ? "反相" : "同相");
-        vTaskDelay(pdMS_TO_TICKS(3000));
-    }
-    invert_old_plane_ = (EPD_INVERT_OLD_PLANE != 0);
-    heap_caps_free(buf);
-    ESP_LOGW(kTag,
-             "自检结束：①有变化=面板与波形正常，查取图/解码；②只有第 4 张有变化="
-             "面板需要 0x04 PON；③四张都没变化=面板无驱动电压（硬件）");
-}
-
 void Ssd1619Display::RawFrameRefresh(const uint8_t* frame, bool partial) {
-    // 外部帧进来先统计"黑像素"数量：全 0 或全 1 的帧意味着上游解码/取图为空，
-    // 屏上当然什么都不会变，但日志里的"已刷新"会骗人。这一行是区分
-    // "取图为空" 和 "面板不驱动" 的最便宜证据。
-    {
-        size_t black = 0;
-        for (size_t i = 0; i < kFrameBytes; ++i) {
-            uint8_t v = static_cast<uint8_t>(~frame[i]);
-            while (v) {
-                black += static_cast<size_t>(v & 1u);
-                v = static_cast<uint8_t>(v >> 1);
-            }
-        }
-        ESP_LOGI(kTag, "外部帧：黑像素 %u/%u（%u%%）partial=%d",
-                 static_cast<unsigned>(black),
-                 static_cast<unsigned>(kFrameBytes * 8),
-                 static_cast<unsigned>(black * 100 / (kFrameBytes * 8)),
-                 partial ? 1 : 0);
-    }
     // 占位此前被释放过（语音会话把仪表盘/对话文本刷上了屏）时，外部画面
     // 必须走全刷：partial 只驱动变化区域，会话文本的像素会残留在屏上。
     bool need_full = false;
@@ -1255,10 +1126,9 @@ void Ssd1619Display::RefreshTask() {
                 black_bits += static_cast<size_t>(__builtin_popcount(
                     static_cast<unsigned>(~tx_frame_[i] & 0xff)));
             }
-            ESP_LOGI(kTag, "LVGL frame ready: black_pixels=%u/%u page=%s",
+            ESP_LOGI(kTag, "LVGL frame ready: black_pixels=%u/%u",
                      static_cast<unsigned>(black_bits),
-                     static_cast<unsigned>(DISPLAY_WIDTH * DISPLAY_HEIGHT),
-                     dashboard_.CurrentPageName().c_str());
+                     static_cast<unsigned>(DISPLAY_WIDTH * DISPLAY_HEIGHT));
             // Cross-page navigation performs the cleaning full refresh. Keep
             // all same-page conversation/menu/book updates partial so a long
             // response or reading session never flashes every N updates.

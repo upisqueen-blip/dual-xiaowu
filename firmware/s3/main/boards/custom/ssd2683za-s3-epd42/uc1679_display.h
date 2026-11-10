@@ -4,7 +4,6 @@
 #include <functional>
 
 #include <driver/spi_master.h>
-#include <driver/gpio.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
@@ -57,8 +56,6 @@ public:
 
     explicit Uc1679Display(
         std::function<bool()> other_panel_busy = nullptr);
-    Uc1679Display(gpio_num_t cs_pin, gpio_num_t busy_pin,
-                  std::function<bool()> other_panel_busy = nullptr);
     ~Uc1679Display();
 
     // 探测面板是否在座（初始化 + 自动探测命令集是否成功）。
@@ -104,8 +101,6 @@ private:
     static constexpr uint8_t k81DeepSleep      = 0x10;  // 深睡（OLD 的 0x10 是 BW 数据）
 
     spi_device_handle_t spi_ = nullptr;
-    gpio_num_t cs_pin_ = EPD_COLOR_CS_PIN;
-    gpio_num_t busy_pin_ = EPD_COLOR_BUSY_PIN;
     uint8_t* dma_buffer_ = nullptr;
     SemaphoreHandle_t mutex_ = nullptr;
     std::function<bool()> other_panel_busy_;

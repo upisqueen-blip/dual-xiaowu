@@ -15,7 +15,6 @@
 #include <cJSON.h>
 #include "settings.h"
 #include "welcome_png.h"
-#include "guide_png.h"
 #include "provisioning_png.h"
 
 LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
@@ -331,18 +330,6 @@ void EpaperDashboard::EnsureUi() {
     lv_obj_align(activation_code_label_, LV_ALIGN_BOTTOM_MID, 0, -34);
     lv_obj_add_flag(activation_code_label_, LV_OBJ_FLAG_HIDDEN);
 
-    xiaowu_pair_code_label_ = lv_label_create(overlay_);
-    lv_obj_set_width(xiaowu_pair_code_label_, LV_PCT(88));
-    lv_obj_set_style_bg_color(xiaowu_pair_code_label_, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(xiaowu_pair_code_label_, LV_OPA_COVER, 0);
-    lv_obj_set_style_text_color(xiaowu_pair_code_label_, lv_color_white(), 0);
-    lv_obj_set_style_text_align(xiaowu_pair_code_label_, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_font(xiaowu_pair_code_label_, &BUILTIN_TEXT_FONT, 0);
-    lv_obj_set_style_pad_all(xiaowu_pair_code_label_, 8, 0);
-    lv_obj_set_style_radius(xiaowu_pair_code_label_, 4, 0);
-    lv_obj_align(xiaowu_pair_code_label_, LV_ALIGN_BOTTOM_MID, 0, -82);
-    lv_obj_add_flag(xiaowu_pair_code_label_, LV_OBJ_FLAG_HIDDEN);
-
     menu_ = lv_obj_create(overlay_);
     lv_obj_remove_style_all(menu_);
     lv_obj_set_size(menu_, LV_PCT(100), 170);
@@ -397,19 +384,6 @@ void EpaperDashboard::EnsureUi() {
     lv_obj_add_flag(welcome_image_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_set_style_bg_color(welcome_image_, lv_color_white(), 0);
     lv_obj_set_style_bg_opa(welcome_image_, LV_OPA_COVER, 0);
-
-    provisioning_ssid_label_ = lv_label_create(overlay_);
-    lv_obj_set_width(provisioning_ssid_label_, LV_PCT(76));
-    lv_obj_set_style_bg_color(provisioning_ssid_label_, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(provisioning_ssid_label_, LV_OPA_COVER, 0);
-    lv_obj_set_style_text_color(provisioning_ssid_label_, lv_color_white(), 0);
-    lv_obj_set_style_text_align(provisioning_ssid_label_, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_font(provisioning_ssid_label_, &BUILTIN_TEXT_FONT, 0);
-    lv_obj_set_style_pad_hor(provisioning_ssid_label_, 8, 0);
-    lv_obj_set_style_pad_ver(provisioning_ssid_label_, 2, 0);
-    lv_obj_align(provisioning_ssid_label_, LV_ALIGN_TOP_MID, 0, 52);
-    lv_obj_add_flag(provisioning_ssid_label_, LV_OBJ_FLAG_HIDDEN);
-    lv_label_set_text(provisioning_ssid_label_, "连接设备热点");
 }
 
 void EpaperDashboard::Show(Page page) {
@@ -444,13 +418,7 @@ void EpaperDashboard::Show(Page page) {
     page_ = page;
     visible_ = true;
     hidden_for_voice_ = false;
-    if (!lvgl_port_lock(3000)) {
-        // 拿不到 LVGL 锁：page_ 已经改了，但既没重绘也没触发物理刷新，
-        // 屏幕会停在上一页。这里不能静默返回，否则现场看就是"切页没反应"。
-        ESP_LOGW(kDashboardTag, "切到 %s：LVGL 锁超时，本次未重绘",
-                 PageName(page));
-        return;
-    }
+    if (!lvgl_port_lock(3000)) return;
     EnsureUi();
     lv_obj_remove_flag(overlay_, LV_OBJ_FLAG_HIDDEN);
     Render();
@@ -464,8 +432,6 @@ void EpaperDashboard::Show(Page page) {
     key += lv_label_get_text(body_);
     key += '|';
     if (activation_code_label_) key += lv_label_get_text(activation_code_label_);
-    key += '|';
-    if (xiaowu_pair_code_label_) key += lv_label_get_text(xiaowu_pair_code_label_);
     key += '|';
     key += std::to_string(selected_item_);
     key += '|';
@@ -517,12 +483,9 @@ void EpaperDashboard::Show(const std::string& name) {
     else Show(Page::kHome);
 }
 
-void EpaperDashboard::ShowActivation(std::string message,
-                                     std::string xiaozhi_code,
-                                     std::string xiaowu_pair_code) {
+void EpaperDashboard::ShowActivation(std::string message, std::string code) {
     activation_message_ = std::move(message);
-    activation_code_ = std::move(xiaozhi_code);
-    xiaowu_pair_code_ = std::move(xiaowu_pair_code);
+    activation_code_ = std::move(code);
     Show(Page::kActivation);
 }
 
@@ -693,18 +656,6 @@ void EpaperDashboard::EnsureWelcomeImageLoaded() {
             const_cast<uint8_t*>(welcome_png), welcome_png_len);
     } catch (...) {
         welcome_image_data_.reset();
-    }
-}
-
-void EpaperDashboard::EnsureGuideImageLoaded() {
-    if (guide_image_data_ != nullptr) return;
-    // 「已联网 · 下一步」信息引导页（guide_png.h）。同样是编译期烘焙的本地
-    // 资源：未绑定 / 后台没配内容 / 连不上服务器时都能显示，不依赖网络。
-    try {
-        guide_image_data_ = std::make_unique<LvglAllocatedImage>(
-            const_cast<uint8_t*>(guide_png), guide_png_len);
-    } catch (...) {
-        guide_image_data_.reset();
     }
 }
 
@@ -1211,15 +1162,18 @@ std::string EpaperDashboard::RenderProfile() const {
 }
 
 std::string EpaperDashboard::RenderWelcome() const {
-    // A 屏「信息引导」页的纯文本兜底（正常情况下走 guide_png.h 那张烘焙图）。
-    // A 屏承担的是"下一步做什么"，品牌欢迎语在 B 屏三色上（welcome_bwr.h）。
-    // 注意：A 屏为黑白墨水屏，正文不含 emoji，行数控制在 4.2" 可完整显示。
-    return "设备已联网 · 下一步\n\n"
-           "1 打开 dualcn.xiaowuai.vip\n"
-           "2 输入屏幕上的设备绑定码\n"
-           "3 后台配置要显示的内容\n"
-           "4 保存后设备自动更新画面\n\n"
-           "售后技术QQ群：65558220";
+    // 配网成功后默认进入的欢迎页（A 屏黑白快刷）。
+    // 风格：亲切、有社区感；同时给出售后群号，方便用户第一时间加群。
+    // 注意：A 屏为黑白墨水屏，正文不含 emoji（字库无彩色表情），
+    // 行数控制在 4.2" 屏可完整显示的范围内。
+    // footer 另有"按 OK 进入功能菜单"提示，此处正文只放引导文案。
+    return "你好大佬，欢迎来到小悟众创！\n\n"
+           "这是你的小悟AI墨水屏——\n"
+           "一块会思考的电子纸。\n\n"
+           "售后群  1056214329\n"
+           "有问题，随时戳我们\n\n"
+           "一起进小悟众创\n"
+           "把脑洞变成屏幕上的现实";
 }
 
 void EpaperDashboard::ProfilePrev() {
@@ -1480,23 +1434,12 @@ void EpaperDashboard::Render() {
     }
     lv_label_set_text(body_, body.c_str());
     if (page_ == Page::kActivation) {
-        if (!activation_code_.empty()) {
-            const std::string code_text = "小智激活码  " + activation_code_;
-            lv_label_set_text(activation_code_label_, code_text.c_str());
-            lv_obj_remove_flag(activation_code_label_, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_add_flag(activation_code_label_, LV_OBJ_FLAG_HIDDEN);
-        }
-        if (!xiaowu_pair_code_.empty()) {
-            const std::string pair_text = "小悟设备绑定码  " + xiaowu_pair_code_;
-            lv_label_set_text(xiaowu_pair_code_label_, pair_text.c_str());
-            lv_obj_remove_flag(xiaowu_pair_code_label_, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_add_flag(xiaowu_pair_code_label_, LV_OBJ_FLAG_HIDDEN);
-        }
+        std::string code_text = "激活码  ";
+        code_text += activation_code_.empty() ? "请稍候" : activation_code_;
+        lv_label_set_text(activation_code_label_, code_text.c_str());
+        lv_obj_remove_flag(activation_code_label_, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(activation_code_label_, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(xiaowu_pair_code_label_, LV_OBJ_FLAG_HIDDEN);
     }
     if (page_ == Page::kHome) {
         static constexpr const char* menu_names[] = {
@@ -1519,37 +1462,19 @@ void EpaperDashboard::Render() {
         if (provisioning) {
             EnsureProvisioningImageLoaded();
         } else {
-            // 已联网但还没绑定 / 后台还没配内容 → A 屏承担「信息引导」：
-            // 明确告诉用户下一步去哪、做什么。品牌欢迎页交给 B 屏三色显示
-            // （welcome_bwr.h），两张图都是烘焙资源，离线也可用。
-            EnsureGuideImageLoaded();
-            if (guide_image_data_ == nullptr) EnsureWelcomeImageLoaded();
+            EnsureWelcomeImageLoaded();
         }
         LvglImage* banner = provisioning ? provisioning_image_data_.get()
-                                         : guide_image_data_.get();
-        if (!provisioning && banner == nullptr) {
-            banner = welcome_image_data_.get();
-        }
+                                         : welcome_image_data_.get();
         if (banner != nullptr) {
             lv_image_set_src(welcome_image_, banner->image_dsc());
             lv_obj_align(welcome_image_, LV_ALIGN_TOP_LEFT, 0, 0);
             lv_obj_remove_flag(welcome_image_, LV_OBJ_FLAG_HIDDEN);
-            if (provisioning) {
-                const std::string ssid = provisioning_ssid_.empty()
-                                             ? "Xiaowu-XXXX"
-                                             : provisioning_ssid_;
-                const std::string label = "热点：" + ssid;
-                lv_label_set_text(provisioning_ssid_label_, label.c_str());
-                lv_obj_remove_flag(provisioning_ssid_label_, LV_OBJ_FLAG_HIDDEN);
-            } else {
-                lv_obj_add_flag(provisioning_ssid_label_, LV_OBJ_FLAG_HIDDEN);
-            }
             lv_obj_add_flag(body_, LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(footer_, LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(title_, LV_OBJ_FLAG_HIDDEN);
         } else {
             lv_obj_add_flag(welcome_image_, LV_OBJ_FLAG_HIDDEN);
-            lv_obj_add_flag(provisioning_ssid_label_, LV_OBJ_FLAG_HIDDEN);
             lv_obj_remove_flag(body_, LV_OBJ_FLAG_HIDDEN);
             lv_obj_remove_flag(footer_, LV_OBJ_FLAG_HIDDEN);
             lv_label_set_text(footer_, provisioning ? "配网成功后自动继续"

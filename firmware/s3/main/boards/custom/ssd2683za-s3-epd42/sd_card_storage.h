@@ -19,6 +19,9 @@ public:
     // Human-readable reason of the last Mount() failure (e.g. exFAT card).
     const std::string& MountError() const { return mount_error_; }
     std::string Status() const;
+    // Capacity in MB. Returns false when the card is not mounted or the
+    // filesystem info is unavailable.
+    bool Capacity(uint32_t& total_mb, uint32_t& free_mb) const;
     std::string List(const std::string& category) const;
     bool Load(const std::string& category, const std::string& name,
               std::vector<uint8_t>& data, size_t limit, std::string& error) const;

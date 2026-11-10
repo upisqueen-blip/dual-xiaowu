@@ -531,14 +531,25 @@ std::string SdCardStorage::Path(const std::string& category, const std::string& 
     return dir.empty() || !SafeName(name) ? std::string() : dir + "/" + name;
 }
 
+bool SdCardStorage::Capacity(uint32_t& total_mb, uint32_t& free_mb) const {
+    if (!mounted_) return false;
+    uint64_t total = 0, free = 0;
+    if (esp_vfs_fat_info("/sdcard", &total, &free) != ESP_OK) return false;
+    total_mb = static_cast<uint32_t>(total / 1048576ULL);
+    free_mb = static_cast<uint32_t>(free / 1048576ULL);
+    return true;
+}
+
 std::string SdCardStorage::Status() const {
     if (!mounted_) return "TF card not mounted";
-    uint64_t total = 0, free = 0;
-    if (esp_vfs_fat_info("/sdcard", &total, &free) != ESP_OK) return "TF card mounted";
-    char text[128];
-    std::snprintf(text, sizeof(text), "TF mounted; total=%llu MB, free=%llu MB",
-                  total / 1048576ULL, free / 1048576ULL);
-    return text;
+    // 不能用 %llu 拼字符串：本工程开了 CONFIG_LIBC_NEWLIB_NANO_FORMAT，
+    // nano printf 不支持 ll 长度修饰符，会把 "total=%llu" 原样吐成
+    // "total=lu"（后台面板上那句看不懂的 "lu MB" 就是这里来的）。
+    // 用 std::to_string 绕开格式化差异。
+    uint32_t total_mb = 0, free_mb = 0;
+    if (!Capacity(total_mb, free_mb)) return "TF card mounted";
+    return "TF mounted; total=" + std::to_string(total_mb) + " MB, free=" +
+           std::to_string(free_mb) + " MB";
 }
 
 std::string SdCardStorage::List(const std::string& category) const {

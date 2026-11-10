@@ -200,7 +200,7 @@ void WifiBoard::StartWifiConfigMode() {
         hint += "\n";
         hint += Lang::Strings::ACCESS_VIA_BROWSER;
         hint += wifi_manager.GetApWebUrl();
-        hint += "\n\n联网后屏幕会请求两组码：小悟设备绑定码填 dualcn.xiaowuai.vip，\n小智激活码填 xiaozhi.me。";
+        hint += "\n\n配网成功后屏幕将显示 6 位激活码，\n打开 xiaozhi.me 输入即可绑定小智对话";
         app.Alert(Lang::Strings::WIFI_CONFIG_MODE, hint.c_str(), "gear", Lang::Sounds::OGG_WIFICONFIG);
         // E-paper needs a persistent, dedicated provisioning page. A regular
         // Alert only updates transient LCD/chat widgets and leaves the
