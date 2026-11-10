@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
+from typing import Optional
 
 import aiosqlite
 import phonenumbers
@@ -10,7 +11,13 @@ from fastapi.responses import JSONResponse
 from phonenumbers.phonenumberutil import NumberParseException
 
 from core.activity_store import log_user_activity
-from core.auth import clear_session_cookie, create_session_token, require_user, set_session_cookie
+from core.auth import (
+    clear_session_cookie,
+    create_session_token,
+    get_current_user_optional,
+    require_user,
+    set_session_cookie,
+)
 from core.config_store import authenticate_user, _hash_password, get_user_api_quota
 from core.db import get_main_db
 from core.email import send_verification_code, verify_code
@@ -208,6 +215,28 @@ async def auth_me(user_id: int = Depends(require_user)):
     if not row:
         return JSONResponse({"error": "用户不存在"}, status_code=404)
     return {"user_id": row[0], "username": row[1], "created_at": row[2]}
+
+
+@router.get("/auth/session")
+async def auth_session(user: Optional[dict] = Depends(get_current_user_optional)):
+    """会话探测：无论是否登录都返回 200。
+
+    /auth/me 在匿名时返回 401，浏览器会把任何 4xx 都记成控制台红字，
+    于是「未登录」在页面上长得像「页面报错」。这里用 200 + user=null
+    表达同样的语义，前端探测登录态就不会再产生错误日志。
+    """
+    if not user:
+        return {"user": None}
+
+    db = await get_main_db()
+    cursor = await db.execute(
+        "SELECT id, username, created_at FROM users WHERE id = ?", (user["user_id"],)
+    )
+    row = await cursor.fetchone()
+    if not row:
+        # token 有效但用户已被删除：按未登录处理，不抛错。
+        return {"user": None}
+    return {"user": {"user_id": row[0], "username": row[1], "created_at": row[2]}}
 
 
 @router.post("/auth/logout")
