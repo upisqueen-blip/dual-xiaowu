@@ -10,6 +10,7 @@ import {
   Coins, TrendingUp,
 } from "lucide-react";
 import { api, authHeaders, BASE_PATH, clearToken, getToken, setToken } from "@/lib/api";
+import { formatCapacity, resolveTfCapacity, tfStatusNote } from "@/lib/tf-capacity";
 
 type SceneKey = string;
 type NavKey = "dashboard" | "scenes" | "screens" | "content" | "apps" | "financeStocks" | "devices" | "members" | "profile" | "connectors" | "settings" | "guide";
@@ -1448,6 +1449,10 @@ function DeviceTfCard({ mac }: { mac: string }) {
   }, [mac]);
   useEffect(() => { void refresh(); }, [refresh]);
   const cats = storage?.categories || {};
+  // 容量优先用设备上报的数字字段；老固件只有文本（且可能是 total=lu 这种
+  // nano-printf 残留），交给 tf-capacity 解析/丢弃，界面不再直接渲染 status。
+  const capacity = resolveTfCapacity(storage);
+  const tfNote = tfStatusNote(storage);
   const meta: { label: string; key: string }[] = [
     { label: "照片", key: "images" },
     { label: "音频", key: "audio" },
@@ -1467,8 +1472,12 @@ function DeviceTfCard({ mac }: { mac: string }) {
         <>
           <div className="tf-status">
             <span className={`status-pill ${storage.mounted ? "on" : ""}`}><i/>{storage.mounted ? "已挂载" : "未挂载"}</span>
-            {storage.total_mb != null ? <span>总容量 {storage.total_mb} MB · 可用 {storage.free_mb ?? "?"} MB</span> : null}
-            {storage.status ? <small>{storage.status}</small> : null}
+            {capacity.totalMb != null ? (
+              <span>总容量 {formatCapacity(capacity.totalMb)} · 可用 {formatCapacity(capacity.freeMb, "未知")}</span>
+            ) : storage.mounted ? (
+              <span>容量待设备上报（若是一直不显示，请升级设备固件后点「刷新」）</span>
+            ) : null}
+            {tfNote ? <small>{tfNote}</small> : null}
           </div>
           {storage.mounted ? (
             <div className="tf-grid">
