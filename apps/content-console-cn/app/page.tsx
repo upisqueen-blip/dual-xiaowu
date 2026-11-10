@@ -23,8 +23,15 @@ type User = { user_id: number; username: string };
 type Device = { mac: string; nickname?: string; role?: string; status?: string; is_online?: boolean; last_seen?: string; owner?: string | null };
 
 const presetScenes: Record<string, Scene> = {
+  // 出厂默认场景：设备还没配任何内容时，A 屏小悟今日首页 + B 屏本地天气。
+  // 放在第一位，场景中心第一张卡片就是它。
+  system: {
+    name: "系统", eyebrow: "默认场景", icon: "系", desc: "开箱即用：A 屏小悟今日（日期/今日安排/电量）、B 屏本地天气，也能播 TF 卡相册",
+    a: { title: "小悟今日", source: "设备数据", refresh: "随双屏刷新", mode: "xiaowu-today", modules: ["日期星期", "今日安排", "电量", "尾号"] },
+    b: { title: "本地天气", source: "和风天气（按城市）", refresh: "每 30 分钟", mode: "weather", modules: ["实时天气", "三日预报", "日出日落", "生活提示"] },
+  },
   family: {
-    name: "家庭", eyebrow: "默认场景", icon: "家", desc: "让每个人都看见今天的重要安排",
+    name: "家庭", eyebrow: "家庭与日程", icon: "家", desc: "让每个人都看见今天的重要安排",
     a: { title: "今日家庭提醒", source: "家庭内容管理", refresh: "每 10 分钟", mode: "family", modules: ["天气", "快递与缴费", "家庭待办", "采购清单", "纪念日"] },
     b: { title: "共享日程", source: "家庭日程（内容管理）", refresh: "每 30 分钟", mode: "family", modules: ["月/周视图", "成员标记", "今日重点", "节假日", "下一项安排"] },
   },
@@ -110,7 +117,7 @@ const developerCenterUrl = process.env.NEXT_PUBLIC_DEVELOPER_CENTER_URL || "/";
 
 export default function DualConsole() {
   const [nav, setNav] = useState<NavKey>("dashboard");
-  const [sceneKey, setSceneKey] = useState<SceneKey>("family");
+  const [sceneKey, setSceneKey] = useState<SceneKey>("system");
   const [deviceMac, setDeviceMac] = useState("");
   const [devices, setDevices] = useState<Device[]>([]);
   const [user, setUser] = useState<User | null>(null);
@@ -141,6 +148,36 @@ export default function DualConsole() {
     if (navItems.some((i) => i.key === nav && i.auth)) setNav("dashboard");
   }, [user, nav]);
 
+  // 后台（或本地草稿）里保存过的 content 只覆盖它实际带了字段，未带字段沿用
+  // 当前值——避免旧版本配置把新增字段清空。
+  function applySavedContent(saved: Record<string, unknown> | undefined | null) {
+    if (!saved || typeof saved !== "object") return;
+    setContent((prev) => ({
+      courseTable: saved.courseTable && typeof saved.courseTable === "object"
+        ? { ...prev.courseTable, ...(saved.courseTable as CourseTable) }
+        : prev.courseTable,
+      notes: Array.isArray(saved.notes) ? (saved.notes as ContentState["notes"]) : prev.notes,
+      homework: Array.isArray(saved.homework) ? (saved.homework as ContentState["homework"]) : prev.homework,
+      reading: Array.isArray(saved.reading) ? (saved.reading as ContentState["reading"]) : prev.reading,
+      album: saved.album && Array.isArray((saved.album as { photos?: unknown[] }).photos)
+        ? (saved.album as ContentState["album"])
+        : prev.album,
+      bills: Array.isArray(saved.bills) ? (saved.bills as ContentState["bills"]) : prev.bills,
+      express: Array.isArray(saved.express) ? (saved.express as ContentState["express"]) : prev.express,
+      familySchedule: Array.isArray(saved.familySchedule) ? (saved.familySchedule as ContentState["familySchedule"]) : prev.familySchedule,
+      familyShopping: Array.isArray(saved.familyShopping) ? (saved.familyShopping as ContentState["familyShopping"]) : prev.familyShopping,
+      familyAnniversaries: Array.isArray(saved.familyAnniversaries) ? (saved.familyAnniversaries as ContentState["familyAnniversaries"]) : prev.familyAnniversaries,
+      familyMembers: Array.isArray(saved.familyMembers)
+        ? (saved.familyMembers as (string | FamilyMember)[])
+            .map((member) => typeof member === "string"
+              ? ({ name: member, role: "member" as const })
+              : ({ name: member.name, role: member.role === "admin" ? "admin" as const : "member" as const }))
+            .filter((member) => !!member.name)
+        : prev.familyMembers,
+      weatherCity: typeof saved.weatherCity === "string" ? (saved.weatherCity as string) : prev.weatherCity,
+    }));
+  }
+
   useEffect(() => {
     const raw = localStorage.getItem("xiaowu_dual_config");
     if (raw) {
@@ -149,24 +186,7 @@ export default function DualConsole() {
         if (saved.sceneKey && scenes[saved.sceneKey as SceneKey]) setSceneKey(saved.sceneKey);
         if (saved.config) setConfig(() => normalizeConfig(saved.config));
         if (saved.deviceMac) setDeviceMac(saved.deviceMac);
-        if (saved.content) setContent((prev) => ({
-          courseTable: saved.content.courseTable && typeof saved.content.courseTable === "object"
-            ? { ...prev.courseTable, ...saved.content.courseTable }
-            : prev.courseTable,
-          notes: Array.isArray(saved.content.notes) ? saved.content.notes : prev.notes,
-          homework: Array.isArray(saved.content.homework) ? saved.content.homework : prev.homework,
-          reading: Array.isArray(saved.content.reading) ? saved.content.reading : prev.reading,
-          album: saved.content.album && Array.isArray(saved.content.album.photos)
-            ? saved.content.album
-            : prev.album,
-          bills: Array.isArray(saved.content.bills) ? saved.content.bills : prev.bills,
-          express: Array.isArray(saved.content.express) ? saved.content.express : prev.express,
-          familySchedule: Array.isArray(saved.content.familySchedule) ? saved.content.familySchedule : prev.familySchedule,
-          familyShopping: Array.isArray(saved.content.familyShopping) ? saved.content.familyShopping : prev.familyShopping,
-          familyAnniversaries: Array.isArray(saved.content.familyAnniversaries) ? saved.content.familyAnniversaries : prev.familyAnniversaries,
-          familyMembers: Array.isArray(saved.content.familyMembers) ? saved.content.familyMembers.map((member: string | FamilyMember) => typeof member === "string" ? ({ name: member, role: "member" as const }) : ({ name: member.name, role: member.role === "admin" ? "admin" as const : "member" as const })).filter((member: FamilyMember) => !!member.name) : prev.familyMembers,
-          weatherCity: typeof saved.content.weatherCity === "string" ? saved.content.weatherCity : prev.weatherCity,
-        }));
+        if (saved.content) applySavedContent(saved.content);
         if (saved.screen && (saved.screen.size === "4.2" || saved.screen.size === "5.83")) {
           const c = saved.screen.colors;
           setScreen({ size: saved.screen.size, colors: c === 2 || c === 3 || c === 4 ? c : 4 });
@@ -188,20 +208,37 @@ export default function DualConsole() {
     } finally { setLoading(false); }
   }
 
-  // 选中设备后回填服务器上已保存的「B 屏色彩」：同一账号换浏览器/换电脑时，
-  // 后台仍应按用户上次选的色数渲染（默认四色会让三色板出四色版式）。
+  // 选中设备后回填服务器上已保存的整份配置（场景 / A·B 屏内容 / 共享内容 /
+  // 屏幕规格）。旧实现只回填 screen，于是换浏览器或清掉 localStorage 后，
+  // 页面会退回默认场景并显示「尚未配置」，而设备其实按后台旧配置在出图。
   useEffect(() => {
     const mac = selectedDevice?.mac;
     if (!mac || !getToken()) return;
     let cancelled = false;
     void (async () => {
       try {
-        const r = await api<{ config?: { screen?: { size?: string; colors?: number } } | null }>(`/api/device/${encodeURIComponent(mac)}/dual-config`);
-        const saved = r?.config?.screen;
+        const r = await api<{
+          config?: {
+            sceneKey?: string;
+            config?: Record<string, { a?: Partial<ScreenConfig>; b?: Partial<ScreenConfig> }>;
+            content?: Record<string, unknown>;
+            screen?: { size?: string; colors?: number };
+          } | null;
+        }>(`/api/device/${encodeURIComponent(mac)}/dual-config`);
+        const saved = r?.config;
         if (cancelled || !saved) return;
-        const size: "4.2" | "5.83" = saved.size === "5.83" ? "5.83" : "4.2";
-        const colors: 2 | 3 | 4 = saved.colors === 2 ? 2 : saved.colors === 3 ? 3 : 4;
-        setScreen({ size, colors });
+        if (saved.sceneKey && scenes[saved.sceneKey as SceneKey]) {
+          setSceneKey(saved.sceneKey as SceneKey);
+        }
+        if (saved.config) setConfig(() => normalizeConfig(saved.config));
+        if (saved.content) applySavedContent(saved.content);
+        const spec = saved.screen;
+        if (spec) {
+          setScreen({
+            size: spec.size === "5.83" ? "5.83" : "4.2",
+            colors: spec.colors === 2 ? 2 : spec.colors === 3 ? 3 : 4,
+          });
+        }
       } catch { /* 离线或未登录时继续用本地草稿 */ }
     })();
     return () => { cancelled = true; };
@@ -277,10 +314,29 @@ export default function DualConsole() {
   function buildPayload() {
     return { version: 1, sceneKey, config, content, screen, deviceMac: selectedDevice?.mac || "", savedAt: new Date().toISOString() };
   }
-  function saveConfiguration() {
-    localStorage.setItem("xiaowu_dual_config", JSON.stringify(buildPayload()));
+  async function saveConfiguration() {
+    const payload = buildPayload();
+    localStorage.setItem("xiaowu_dual_config", JSON.stringify(payload));
     setSavedAt(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }));
-    notify(selectedDevice ? `已保存 ${selectedDevice.nickname || selectedDevice.mac} 的双屏模式` : "双屏模式已保存为本地模式");
+    // 关键：「保存」必须落库。旧实现只写 localStorage，于是页面预览是新场景、
+    // 后台库还是上一次的配置，设备自然按旧配置出图（表现为"后台改了设备没变"）。
+    if (!selectedDevice || !getToken()) {
+      notify(selectedDevice
+        ? `已保存 ${selectedDevice.nickname || selectedDevice.mac} 的双屏模式（本地，登录后才同步后台）`
+        : "双屏模式已保存为本地模式");
+      return;
+    }
+    try {
+      await api(`/api/device/${encodeURIComponent(selectedDevice.mac)}/dual-config`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      notify(`已保存到后台：${selectedDevice.nickname || selectedDevice.mac}（设备将自动刷新）`);
+    } catch (error) {
+      const msg = error instanceof Error && error.message ? error.message : "网络错误";
+      notify(`已保存到本地，但同步后台失败：${msg}`);
+    }
   }
   async function applyToDevice() {
     if (!selectedDevice) { notify("请先在设备管理绑定并选择一台设备"); return; }
@@ -1040,7 +1096,7 @@ function ScreenEditor({ scene, sceneKey, value, update, save, savedAt, content, 
   const { weatherPreview, weatherLoading, weatherError } = useDualWeatherPreview(sceneKey === "family" && value.a.mode === "family-weather", deviceMac, content.weatherCity);
   return <>
     <div className="page-intro row"><div><span className="kicker">{scene.name.toUpperCase()} SCENE</span><h2>{scene.name}场景 · 双屏配置</h2><p>A 屏负责快速文字信息，B 屏负责彩色结构与图像。</p></div><div className="save-state"><ShieldCheck size={17}/>{savedAt ? `模式保存于 ${savedAt}` : "配置尚未保存"}</div></div>
-    <ScreenSettings value={screen} onChange={setScreen} sceneKey={sceneKey} bMode={value.b.mode || defaultMode(sceneKey, "b")} deviceMac={deviceMac} />
+    <ScreenSettings value={screen} onChange={setScreen} sceneKey={sceneKey} aMode={value.a.mode || defaultMode(sceneKey, "a")} bMode={value.b.mode || defaultMode(sceneKey, "b")} deviceMac={deviceMac} />
     <div className="editor-grid">
       <ScreenForm kind="a" sceneKey={sceneKey} value={value.a} onChange={(p) => update("a", p)}/>
       <ScreenPreview kind="a" sceneKey={sceneKey} scene={scene.name} config={value.a} content={content} screen={screen} deviceMac={deviceMac} weatherPreview={weatherPreview} weatherLoading={weatherLoading} weatherError={weatherError}/>
@@ -1052,18 +1108,30 @@ function ScreenEditor({ scene, sceneKey, value, update, save, savedAt, content, 
   </>;
 }
 
-function ScreenSettings({ value, onChange, sceneKey, bMode, deviceMac }: { value: { size: "4.2" | "5.83"; colors: 2 | 3 | 4 }; onChange: (s: { size: "4.2" | "5.83"; colors: 2 | 3 | 4 }) => void; sceneKey: SceneKey; bMode: string; deviceMac: string }) {
+function ScreenSettings({ value, onChange, sceneKey, aMode, bMode, deviceMac }: { value: { size: "4.2" | "5.83"; colors: 2 | 3 | 4 }; onChange: (s: { size: "4.2" | "5.83"; colors: 2 | 3 | 4 }) => void; sceneKey: SceneKey; aMode: string; bMode: string; deviceMac: string }) {
   const colorNote = value.colors === 2
     ? "黑白双色：无彩色强调，全部信息用黑/白网点表达。"
     : value.colors === 3
       ? "三色版式：黑白红。红色是唯一强调色，不输出任何黄色像素。"
       : "四色版式：黑白红黄。黄色用于标题条/节气/日期等版式强调，红色留给涨幅与警示。";
-  // 后端真实出图（与设备取图同一套渲染代码）：切换色数即可看到三色/四色两版差异。
-  // 已选设备时带上 mac 渲染已保存内容，并用 forceColors 让色数立即跟随下拉框；
-  // 未选设备时退回模板出图（sceneKey/bMode）。
-  const liveSrc = deviceMac
-    ? `${BASE_PATH}/api/preview?persona=DUAL_B&w=400&h=300&colors=${value.colors}&forceColors=${value.colors}&mac=${encodeURIComponent(deviceMac)}&v=${value.colors}`
-    : `${BASE_PATH}/api/preview?persona=DUAL_B&w=400&h=300&colors=${value.colors}&sceneKey=${encodeURIComponent(sceneKey)}&bMode=${encodeURIComponent(bMode)}&v=${value.colors}`;
+  // 后端真实出图（与设备取图同一套渲染代码）：切换色数/场景/模式都能立即看到效果。
+  // 已选设备时也带上 sceneKey/bMode（后端按覆盖参数优先），否则切到「家庭」页，
+  // 预览仍会按设备里残留的 sceneKey 出图（例如上次停在理财，B 屏一直是板块动向）；
+  // mac 只用于取该设备的真实内容数据（日程/待办/自选股），不决定版式。
+  // A 屏是黑白 1bit 面板（FPC1），与 B 屏色数无关，固定 colors=2。
+  const liveQuery = (persona: "DUAL_A" | "DUAL_B", colors: number, mode: string) => [
+    `persona=${persona}&w=400&h=300&colors=${colors}&forceColors=${colors}`,
+    `sceneKey=${encodeURIComponent(sceneKey)}`,
+    `${persona === "DUAL_A" ? "aMode" : "bMode"}=${encodeURIComponent(mode)}`,
+    deviceMac ? `mac=${encodeURIComponent(deviceMac)}` : "",
+    `v=${colors}-${encodeURIComponent(sceneKey)}-${encodeURIComponent(mode)}`,
+  ].filter(Boolean).join("&");
+  const aSrc = `${BASE_PATH}/api/preview?${liveQuery("DUAL_A", 2, aMode)}`;
+  const bSrc = `${BASE_PATH}/api/preview?${liveQuery("DUAL_B", value.colors, bMode)}`;
+  const colorName = value.colors === 3 ? "三色" : value.colors === 4 ? "四色" : "黑白";
+  // 模式用中文标签展示，别把内部 key（welcome / album-tf）暴露到界面上
+  const modeLabel = (kind: "a" | "b", key: string) =>
+    SCENE_MODES[sceneKey]?.[kind].find((m) => m.key === key)?.label || key;
   return <div className="card-pad screen-settings">
     <div className="tt-grid-head"><span>屏幕规格</span><span className="tt-hint">决定 B 屏按几色渲染，需与设备实际面板一致（三色板选四色时，黄色会按红色出）</span></div>
     <div className="ss-row">
@@ -1079,17 +1147,41 @@ function ScreenSettings({ value, onChange, sceneKey, bMode, deviceMac }: { value
     </div>
     <p className="ss-note">{colorNote}切换后点「应用到设备」生效（设备按此色数出图，不再依赖固件编译期配置）。</p>
     <div className="ss-live">
-      <img src={liveSrc} alt="B 屏后端渲染效果" />
-      <div>
-        <b>B 屏 · 后端真实出图</b>
-        <span>{deviceMac ? `当前按 ${value.colors === 3 ? "三色" : value.colors === 4 ? "四色" : "黑白"}渲染（与应用后设备一致）` : "未选择设备，展示演示模板"}</span>
-        <a href={liveSrc} target="_blank" rel="noreferrer">新窗口打开</a>
+      <div className="ss-live-item">
+        <img src={aSrc} alt="A 屏后端渲染效果"/>
+        <div>
+          <b>A 屏 · 黑白 1bit</b>
+          <span>400 × 300 · {modeLabel("a", aMode)}</span>
+          <a href={aSrc} target="_blank" rel="noreferrer">新窗口打开</a>
+        </div>
+      </div>
+      <div className="ss-live-item">
+        <img src={bSrc} alt="B 屏后端渲染效果"/>
+        <div>
+          <b>B 屏 · {colorName}</b>
+          <span>400 × 300 · {modeLabel("b", bMode)}{deviceMac ? ` · 按${colorName}渲染` : " · 演示模板"}</span>
+          <a href={bSrc} target="_blank" rel="noreferrer">新窗口打开</a>
+        </div>
       </div>
     </div>
   </div>;
 }
 
 const SCENE_MODES: Record<SceneKey, { a: { key: string; label: string }[]; b: { key: string; label: string }[] }> = {
+  // 系统场景：出厂默认。A 屏小悟今日首页（日常态）或欢迎页（配网引导），B 屏天气或相册。
+  system: {
+    a: [
+      { key: "xiaowu-today", label: "小悟今日（日期 + 今日安排 + 电量）" },
+      { key: "welcome", label: "欢迎页（品牌 + 配网引导）" },
+      { key: "notes", label: "便签" },
+      { key: "album", label: "相册" },
+    ],
+    b: [
+      { key: "weather", label: "本地天气" },
+      { key: "album-tf", label: "TF 卡相册（设备本地读取）" },
+      { key: "album", label: "相册（后台上传）" },
+    ],
+  },
   family: {
     a: [
       { key: "family", label: "家庭提醒（总览含日程）" },
@@ -1187,6 +1279,20 @@ function ScreenForm({ kind, sceneKey, value, onChange }: { kind: "a"|"b"; sceneK
   const familySource = (mode: string) => kind === "b"
     ? mode === "album" ? "后台相册（内容管理）" : "后台家庭日程（内容管理）"
     : ({ family: "家庭内容管理（天气、快递缴费、待办、日程、采购、纪念日）", "family-weather": "和风天气 API（设备城市）", "family-express-bills": "家庭内容管理（快递与缴费）", "family-todos": "家庭内容管理（待办与便签）", "family-shopping": "家庭内容管理（采购清单）", "family-anniversary": "家庭内容管理（纪念日）", notes: "后台便签", album: "后台相册（内容管理）" } as Record<string, string>)[mode] || "家庭内容管理";
+  // 切换模式时同步「内容来源」文案：家庭与系统场景的 source 有明确归属，
+  // 其它场景沿用用户手填值（不覆写）。
+  const autoSource = (mode: string): string | null => {
+    if (sceneKey === "system") {
+      if (kind === "b") {
+        if (mode === "album-tf") return "TF 卡（/xiaowu/images）";
+        if (mode === "album") return "后台相册（内容管理）";
+        return "和风天气（按城市）";
+      }
+      return mode === "album" ? "后台相册（内容管理）" : "设备内置";
+    }
+    if (sceneKey === "family") return familySource(mode);
+    return null;
+  };
   const sourceOptions = sceneKey === "finance"
     ? ["行情数据源"]
     : [
@@ -1197,7 +1303,7 @@ function ScreenForm({ kind, sceneKey, value, onChange }: { kind: "a"|"b"; sceneK
   return <div className={`screen-form ${kind}`}>
     <div className="screen-form-head"><div><span>{kind.toUpperCase()} 屏</span><h3>{kind === "a" ? "FPC1 · 黑白快刷" : "FPC2 · 三色 / 四色"}</h3></div><span className="screen-status"><i/>已启用</span></div>
     <label>屏幕内容名称<input value={value.title} onChange={(e) => onChange({ title: e.target.value })}/></label>
-    <label>{kind.toUpperCase()} 屏模式<select value={value.mode || modes[0].key} onChange={(e) => onChange({ mode: e.target.value, ...(sceneKey === "family" ? { source: familySource(e.target.value) } : {}) })}>{modes.map((m) => <option key={m.key} value={m.key}>{m.label}</option>)}</select></label>
+    <label>{kind.toUpperCase()} 屏模式<select value={value.mode || modes[0].key} onChange={(e) => { const src = autoSource(e.target.value); onChange({ mode: e.target.value, ...(src ? { source: src } : {}) }); }}>{modes.map((m) => <option key={m.key} value={m.key}>{m.label}</option>)}</select></label>
     {value.mode === "published-app" ? (
       <div className="pub-app-pick">
         <label>ISV 应用
@@ -1219,6 +1325,9 @@ function ScreenForm({ kind, sceneKey, value, onChange }: { kind: "a"|"b"; sceneK
       </div>
     ) : null}
     {value.mode === "pomodoro" ? <PomodoroConfig value={value.preset} onChange={(preset) => onChange({ preset })}/> : null}
+    {value.mode === "album-tf" ? <p className="tt-hint">TF 卡相册：把 JPG 放进卡的 <b>/xiaowu/images</b> 目录，设备每次刷新轮换下一张。图片不经过服务器，断网也能播；卡没插或目录为空时自动回落到后台相册。</p> : null}
+    {value.mode === "welcome" ? <p className="tt-hint">欢迎页由服务端出图（品牌 + 唤醒引导 + 底部电量），不依赖任何内容数据；后台改标题不会影响版式。</p> : null}
+    {value.mode === "xiaowu-today" ? <p className="tt-hint">小悟今日取「家庭日程（今天）+ 未完成作业 + 便签」，按 日程 → 作业 → 便签 排前 4 条；日期、电量、尾号由服务端按设备实时状态出图。</p> : null}
     {sceneKey === "family" && <p className="tt-hint">家庭提醒由所选模式决定读取的内容，来源标签自动对应「内容管理」中的相应数据，不能手动选成其他来源；家庭日程在「内容管理 → 家庭日程」维护。{value.mode === "family-weather" ? "城市在 dual「个人中心 → 家庭与设备位置」设置；此处会请求实时天气，设备刷新时也使用同一城市。" : ""}</p>}
     <div className="field-row"><label>数据来源{sceneKey === "family" ? <input value={familySource(value.mode || modes[0].key)} readOnly /> : <select value={value.source} onChange={(e) => onChange({ source: e.target.value })}>{[value.source, ...sourceOptions.filter((source) => source !== value.source)].map((source) => <option key={source} value={source}>{source}</option>)}</select>}</label><label>刷新频率<select value={value.refresh} onChange={(e) => onChange({ refresh: e.target.value })}>{[value.refresh, ...refreshOptions.filter((refresh) => refresh !== value.refresh)].map((refresh) => <option key={refresh} value={refresh}>{refresh}</option>)}</select></label></div>
     <div className="module-label"><span>内容模块</span><button onClick={() => { const preset = ["相册", "天气", "倒计时"].find((m) => !value.modules.includes(m)) || "新模块"; onChange({ modules: [...value.modules, preset] }); }}><Plus size={14}/>添加</button></div>
@@ -1245,32 +1354,44 @@ function ScreenPreview({ kind, sceneKey, scene, config, content, screen, deviceM
     body = kind === "a" && mode === "notes"
       ? <NotesPreview notes={content.notes} />
       : <FinanceModePreview kind={kind} mode={mode} />;
-  } else if (sceneKey === "family" && kind === "a") {
-    const modeLabels: Record<string, string> = {
-      family: "家庭提醒（总览含日程）", "family-weather": "天气", "family-express-bills": "快递与缴费",
-      "family-todos": "家庭待办", "family-shopping": "采购清单", "family-anniversary": "纪念日",
-    };
-    const modeNotes: Record<string, string> = {
-      family: `家庭内容总览 · 日程 ${content.familySchedule.length} 项 · 采购 ${content.familyShopping.filter(x => !x.done).length} 项`, "family-weather": weatherLoading ? "正在读取实时天气数据…" : weatherError ? `天气数据读取失败 · ${weatherError}` : "实时天气与未来预报",
-      "family-express-bills": `${content.express.filter((x) => x.status !== "signed").length} 个未签收快递 · ${content.bills.filter((x) => !x.paid).length} 项待缴费`,
-      "family-todos": `待办与便签 · ${content.homework.filter((x) => !x.done).length} 项待办`,
-      "family-shopping": `${content.familyShopping.filter(x => !x.done).length} 项未完成采购`, "family-anniversary": `${content.familyAnniversaries.length} 个家庭纪念日`,
-    };
-    const selectedMode = config.mode || "family";
-    const eventRows = content.familySchedule.slice(0, 3).map(x => `${x.date}${x.time ? ` ${x.time}` : ""} ${x.title}`);
-    const previewModules = selectedMode === "family"
-      ? [...eventRows, ...config.modules]
-      : selectedMode === "family-shopping" ? content.familyShopping.filter(x => !x.done).slice(0, 5).map(x => x.text)
-        : selectedMode === "family-anniversary" ? content.familyAnniversaries.slice(0, 5).map(x => `${x.date} ${x.title}`)
-          : selectedMode === "family-todos" ? content.homework.filter(x => !x.done).slice(0, 5).map(x => x.text)
-            : [modeLabels[selectedMode] || config.title];
-    body = selectedMode === "family-weather"
-      ? <WeatherBoard data={weatherPreview} loading={!!weatherLoading} error={weatherError || ""} city={content.weatherCity || "设备城市"} />
-      : selectedMode === "family" ? <FamilyTodayScreen content={content} />
-      : <SceneModePreview title={modeLabels[selectedMode] || config.title} modules={previewModules} note={modeNotes[selectedMode] || "家庭场景"} />;
-  } else if (sceneKey === "family" && kind === "b") {
-    const isAlbum = config.mode === "album";
-    body = isAlbum ? <AlbumPreview album={content.album} /> : <FamilyWeekScreen content={content} />;
+  } else if (sceneKey === "system") {
+    // 系统场景（出厂默认）：A 欢迎页/便签/相册，B 天气/相册，全部走后端真实出图，
+    // 前端不复刻版式——设备取图与后台看到的是同一份 render.py 输出。
+    const persona = kind === "a" ? "DUAL_A" : "DUAL_B";
+    const colors = kind === "b" ? screen.colors : 2;
+    const mode = config.mode || (kind === "a" ? "xiaowu-today" : "weather");
+    const liveParams = [
+      `persona=${persona}`,
+      "w=400",
+      "h=300",
+      `colors=${colors}`,
+      `forceColors=${colors}`,
+      "sceneKey=system",
+      `${kind === "a" ? "aMode" : "bMode"}=${encodeURIComponent(mode)}`,
+      deviceMac ? `mac=${encodeURIComponent(deviceMac)}` : "",
+      `v=${colors}-${encodeURIComponent(mode)}`,
+    ].filter(Boolean).join("&");
+    body = <div className="kline-full"><img className="kline-full-img" alt={kind === "a" ? "A 屏欢迎页" : "B 屏天气或相册"} src={`${BASE_PATH}/api/preview?${liveParams}`} /></div>;
+  } else if (sceneKey === "family") {
+    // 家庭看板一律用后端真实出图：与设备取图是同一套 render.py，
+    // 后台看到的版式就是屏上会显示的版式（旧实现是前端手绘三栏卡片，
+    // 与设备实际出图完全不同，用户没法把两边对上）。
+    // 注意：内容改动需要点「保存模式」后预览才会刷新。
+    const persona = kind === "a" ? "DUAL_A" : "DUAL_B";
+    const colors = kind === "b" ? screen.colors : 2;
+    const familyMode = config.mode || "family";
+    const liveParams = [
+      `persona=${persona}`,
+      "w=400",
+      "h=300",
+      `colors=${colors}`,
+      `forceColors=${colors}`,
+      "sceneKey=family",
+      kind === "a" ? `aMode=${encodeURIComponent(familyMode)}` : `bMode=${encodeURIComponent(familyMode)}`,
+      deviceMac ? `mac=${encodeURIComponent(deviceMac)}` : "",
+      `v=${colors}-${encodeURIComponent(familyMode)}`,
+    ].filter(Boolean).join("&");
+    body = <div className="kline-full"><img className="kline-full-img" alt={kind === "a" ? "A 屏家庭今日总览" : "B 屏家庭周历"} src={`${BASE_PATH}/api/preview?${liveParams}`} /></div>;
   } else if (config.mode === "pomodoro") {
     // 番茄钟按设备真实会话出图，前端不复刻版式——这样预览和屏上永远一致。
     const persona = kind === "a" ? "DUAL_A" : "DUAL_B";

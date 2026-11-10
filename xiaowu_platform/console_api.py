@@ -305,6 +305,37 @@ def claim(body: ClaimIn, user_id: str = Depends(current_user)) -> dict[str, Any]
 
 
 # ——— 双屏内容配置 ———
+def _factory_system_config(mac: str) -> dict[str, Any]:
+    """出厂默认双屏配置：系统场景（A 屏欢迎页 + B 屏本地天气）。
+
+    新设备刚绑定、用户还没在后台保存过任何内容时，dual-config 返回它，
+    固件才会判定「已启用双屏」并开始拉图——否则屏幕上只有固件内置欢迎页，
+    B 屏永远不亮。用户一旦保存，就以真实配置覆盖（本函数不落库）。
+    """
+    return {
+        "version": 1,
+        "sceneKey": "system",
+        "deviceMac": mac,
+        "screen": {"size": "4.2", "colors": 3},
+        "config": {
+            "system": {
+                "a": {
+                    "mode": "xiaowu-today", "title": "小悟今日", "source": "设备数据",
+                    "refresh": "随双屏刷新",
+                    "modules": ["日期星期", "今日安排", "电量", "尾号"],
+                },
+                "b": {
+                    "mode": "weather", "title": "本地天气",
+                    "source": "和风天气（按城市）", "refresh": "每 30 分钟",
+                    "modules": ["实时天气", "三日预报", "日出日落", "生活提示"],
+                },
+            }
+        },
+        "content": {},
+        "savedAt": "factory-system-v1",
+    }
+
+
 @router.get("/api/device/{mac}/dual-config")
 def get_dual_config(
     mac: str,
@@ -321,7 +352,8 @@ def get_dual_config(
         raise HTTPException(status.HTTP_403_FORBIDDEN, "无权访问该设备配置")
     cfg = store.get_content_config(mac)
     if not cfg:
-        return {"config": None, "updated_at": ""}
+        # 未配置 = 出厂状态，走系统场景默认（不写库，避免把默认值当成用户数据）。
+        return {"config": _factory_system_config(mac), "updated_at": "factory-system-v1"}
     return cfg
 
 
@@ -643,10 +675,21 @@ def _weather_payload(city: str) -> dict[str, Any]:
         "sunset": "17:48",
         "advice": "雨天出门，记得带伞。",
         "updated_at": now.strftime("%Y-%m-%d %H:%M"),
+        # 预报日期必须跟着当天走：写死的日期（如 10-22）会在十一月露馅。
+        # 数值仍是演示值，接真实源时连这里一起替换。
         "forecast": [
-            {"day": "明天", "date": "10-22", "temp_range": "19°~23°", "desc": "多云", "code": 1},
-            {"day": "后天", "date": "10-23", "temp_range": "20°~26°", "desc": "多云转晴", "code": 2},
-            {"day": "周四", "date": "10-24", "temp_range": "18°~24°", "desc": "小雨", "code": 61},
+            {
+                "day": "明天" if i == 1 else ("后天" if i == 2 else "周" + "一二三四五六日"[(now + timedelta(days=i)).weekday()]),
+                "date": (now + timedelta(days=i)).strftime("%m-%d"),
+                "temp_range": rng,
+                "desc": desc,
+                "code": code,
+            }
+            for i, desc, code, rng in (
+                (1, "多云", 1, "19°~23°"),
+                (2, "多云转晴", 2, "20°~26°"),
+                (3, "小雨", 61, "18°~24°"),
+            )
         ],
     }
 

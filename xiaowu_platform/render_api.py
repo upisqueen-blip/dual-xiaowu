@@ -297,7 +297,10 @@ def preview(
 
     # 即时预览覆盖：按所选模式直接出图（不依赖已保存的设备配置）
     if aMode or bMode or sceneKey:
-        sk = (sceneKey or "finance").strip() or "finance"
+        sk = (sceneKey or "system").strip() or "system"
+        # 系统场景（默认场景）的 A/B 兜底：A 小悟今日首页、B 天气。
+        default_a = "xiaowu-today" if sk == "system" else "finance-watch"
+        default_b = "weather" if sk == "system" else "finance-trend"
         # 用真实 mac 而非 "DEMO"：番茄钟等「按设备状态出图」的模式要读到该设备的会话，
         # 否则后台切到 pomodoro 只会看到一张「未开始」的空卡。
         mac_code = (mac or "DEMO").strip().upper()
@@ -307,11 +310,29 @@ def preview(
             "screen": {"size": "4.2", "colors": colors},
             "config": {
                 sk: {
-                    "a": {"mode": (aMode or "finance-watch"), "title": (aMode or "实时行情")},
-                    "b": {"mode": (bMode or "finance-trend"), "title": (bMode or "行情趋势")},
+                    "a": {"mode": (aMode or default_a), "title": (aMode or "实时行情")},
+                    "b": {"mode": (bMode or default_b), "title": (bMode or "行情趋势")},
                 }
             },
         }
+        # 覆盖只换「版式」（场景 + A/B 模式），设备里已有的内容数据要沿用：
+        # 否则后台切到「家庭」预览，日程/待办/购物清单全是空的，看起来像坏了。
+        if mac:
+            cfg_row = store.get_content_config(mac_code)
+            base = ((cfg_row or {}).get("config") or {}) if isinstance(cfg_row, dict) else {}
+            if isinstance(base, dict):
+                if isinstance(base.get("content"), dict):
+                    override_cfg["content"] = base["content"]
+                base_scene = base.get("config", {}).get(sk) if isinstance(base.get("config"), dict) else None
+                if isinstance(base_scene, dict):
+                    for kind, chosen in (("a", aMode), ("b", bMode)):
+                        src = base_scene.get(kind)
+                        # 只沿用模块/城市/标题这类数据字段，mode 必须听覆盖参数。
+                        if chosen and isinstance(src, dict):
+                            for key, value in src.items():
+                                if key == "mode":
+                                    continue
+                                override_cfg["config"][sk][kind].setdefault(key, value)
         try:
             if screen == "B":
                 img = render_dual_screen(mac_code, "B", w, h, colors, override_cfg)
@@ -365,9 +386,14 @@ def _demo_config() -> dict:
     """无设备时的演示双屏配置，方便打开预览即有内容。"""
     return {
         "version": 1,
-        "sceneKey": "study",
+        "sceneKey": "system",
         "screen": {"size": "4.2", "colors": 4},
         "config": {
+            # 演示默认落在系统场景：与「设备开箱、还没配内容」看到的一致。
+            "system": {
+                "a": {"mode": "xiaowu-today", "title": "小悟今日"},
+                "b": {"mode": "weather", "title": "天气"},
+            },
             "study": {
                 "a": {"mode": "notes", "title": "便签"},
                 "b": {"mode": "course", "title": "课程表"},

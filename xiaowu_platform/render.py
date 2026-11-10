@@ -22,7 +22,7 @@ import io
 import logging
 import re
 import time
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
@@ -40,6 +40,10 @@ _FONT_DIR = Path(__file__).resolve().parent / "fonts"
 _UPLOAD_DIR = Path(__file__).resolve().parent.parent / "data" / "uploads"
 
 _WEEKDAY_CN = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+
+# 设备没有任何内容配置时的兜底场景：系统场景（A 屏欢迎页 + B 屏天气）。
+# 旧版缺省是 study，结果未配置设备一上来就是「作业/课程表」，对刚拆封的用户是噪音。
+DEFAULT_SCENE_KEY = "system"
 
 
 # ── 字体 / 打包助手 ──────────────────────────────────────────
@@ -837,6 +841,266 @@ def render_course(mac: str, w: int, h: int, colors: int,
     return img
 
 
+_LOGO_MARK = Path(__file__).resolve().parent / "assets" / "logo-mark.png"
+_logo_mask_cache: dict[tuple[int, int], Any] = {}
+
+
+def _logo_mark_mask(width: int, height: int):
+    """品牌 logo 的 1bpp 墨量蒙版（255=上墨）。
+
+    米色小间距描边在 1bpp 面板上无法还原，统一按白处理，只保留水滴轮廓、
+    猴脸与文字笔画——这样缩小到 70×100 左右仍然认得出来。
+    资源缺失时返回 None，由调用方退回抽象图形。
+    """
+    key = (width, height)
+    cached = _logo_mask_cache.get(key)
+    if cached is not None:
+        return cached
+    try:
+        src = Image.open(_LOGO_MARK).convert("RGBA")
+    except Exception:  # noqa: BLE001 —— 缺资源不应让整页出图失败
+        logger.warning("logo 资源缺失：%s", _LOGO_MARK)
+        return None
+    flat = Image.new("RGBA", src.size, (255, 255, 255, 255))
+    flat.alpha_composite(src)
+    gray = flat.convert("L").resize((max(1, width), max(1, height)), Image.LANCZOS)
+    mask = gray.point(lambda v: 255 if v < 150 else 0)
+    _logo_mask_cache[key] = mask
+    return mask
+
+
+def _paste_logo(img: Image.Image, x: int, y: int, width: int, height: int, ink: int) -> bool:
+    mask = _logo_mark_mask(width, height)
+    if mask is None:
+        return False
+    img.paste(ink, (x, y, x + width, y + height), mask)
+    return True
+
+
+def _render_welcome(w: int, h: int, colors: int, battery: Optional[int] = None,
+                    mac: str = "", title: str = "小悟 AI") -> Image.Image:
+    """系统场景 A 屏：欢迎页。
+
+    出厂/未配置设备的第一眼只讲三件事——这是谁、怎么唤醒、去哪配置。
+    不依赖任何内容数据，断网也能出图（固件另有内置烘焙欢迎页做更深一层的兜底）。
+    黑白 1bpp 友好：全部实心/描边图形，不使用灰阶。
+    """
+    s = w / 400.0
+    img = _palette_p_image(w, h, colors) if colors >= 3 else Image.new("1", (w, h), 1)
+    draw = ImageDraw.Draw(img)
+    fg = 0
+    wht = 1
+    f_brand = _load_serif(max(18, int(33 * s)), bold=True)
+    f_sub = _load_cjk(max(9, int(12 * s)))
+    f_meta = _load_cjk(max(8, int(10 * s)))
+    f_body = _load_cjk(max(10, int(13 * s)))
+
+    # ── 顶部：英文小标 + 日期 ────────────────────────────────
+    draw.text((int(16 * s), int(11 * s)), "XIAOWU AI", fill=fg, font=f_meta)
+    today = datetime.now().strftime("%m月%d日")
+    draw.text((w - int(16 * s) - _text_w(draw, today, f_meta), int(11 * s)),
+              today, fill=fg, font=f_meta)
+    draw.line([(int(16 * s), int(27 * s)), (w - int(16 * s), int(27 * s))],
+              fill=fg, width=1)
+
+    # ── 中上：品牌 logo + 名称（整组水平居中）────────────────
+    logo_h = int(104 * s)
+    logo_w = int(logo_h * 0.715)  # 与 logo-mark.png 原始比例一致
+    gap = int(16 * s)
+    brand_w = _text_w(draw, title[:8], f_brand)
+    sub_text = "森穹小悟 · 双屏墨水屏"
+    sub_w = _text_w(draw, sub_text, f_sub)
+    text_w = max(brand_w, sub_w)
+    group_w = logo_w + gap + text_w
+    bx = max(int(16 * s), (w - group_w) // 2)
+    by = int(44 * s)
+    if not _paste_logo(img, bx, by, logo_w, logo_h, fg):
+        # 兜底：抽象双屏图标（logo 资源缺失时仍要有品牌感）
+        bw, bh = int(52 * s), int(39 * s)
+        off = int(7 * s)
+        draw.rounded_rectangle([bx + off, by - off + int(20 * s), bx + bw + off, by + bh - off + int(20 * s)],
+                               radius=int(3 * s), outline=fg, width=max(1, int(2 * s)))
+        draw.rounded_rectangle([bx, by + int(20 * s), bx + bw, by + bh + int(20 * s)],
+                               radius=int(3 * s), fill=fg)
+        for i in range(3):
+            ly = by + int((31 + i * 9) * s)
+            draw.line([(bx + int(8 * s), ly), (bx + bw - int(8 * s), ly)],
+                      fill=wht, width=max(1, int(2 * s)))
+
+    tx = bx + logo_w + gap
+    draw.text((tx, by + int(22 * s)), title[:8], fill=fg, font=f_brand)
+    draw.text((tx, by + int(70 * s)), sub_text, fill=fg, font=f_sub)
+
+    draw.line([(int(16 * s), int(158 * s)), (w - int(16 * s), int(158 * s))],
+              fill=fg, width=max(1, int(2 * s)))
+
+    # ── 引导三行：圆点 + 文案 ────────────────────────────────
+    guides = [
+        "长按 OK 键，说「你好小悟」",
+        "浏览器打开 xiaowuai.vip 配双屏",
+        "TF 卡放图，B 屏可当相册",
+    ]
+    gy = int(168 * s)
+    step = int(31 * s)
+    for i, line in enumerate(guides):
+        y = gy + i * step
+        r = max(2, int(3 * s))
+        cy = y + f_body.size // 2
+        draw.ellipse([int(20 * s) - r, cy - r, int(20 * s) + r, cy + r], fill=fg)
+        draw.text((int(32 * s), y), line[:26], fill=fg, font=f_body)
+
+    # ── 底部：尾号 / 网址（居中）/ 电量（右对齐）────────────
+    draw.line([(int(16 * s), h - int(26 * s)), (w - int(16 * s), h - int(26 * s))],
+              fill=fg, width=1)
+    tail = str(mac or "").replace(":", "").strip().upper()
+    # 只有真正的 MAC 才显示尾号；预览用的占位串（DEMO 等）不显示，避免出图上出现「尾号 DEMO」
+    if len(tail) >= 4 and all(c in "0123456789ABCDEF" for c in tail):
+        draw.text((int(16 * s), h - int(19 * s)), f"尾号 {tail[-4:]}",
+                  fill=fg, font=f_meta)
+    site = "xiaowuai.vip"
+    draw.text(((w - _text_w(draw, site, f_meta)) // 2, h - int(19 * s)),
+              site, fill=fg, font=f_meta)
+    if battery is not None:
+        _draw_battery_with_text(draw, w - int(16 * s), h - int(14 * s), s,
+                                battery, f_meta, fg)
+    return img
+
+
+def _fit_text_to_width(draw: ImageDraw.ImageDraw, text: str, font, max_w: int) -> str:
+    """按像素宽度裁剪文本，超宽补省略号。中英混排时按字符宽度算，比按字数靠谱。"""
+    if max_w <= 0:
+        return ""
+    if _text_w(draw, text, font) <= max_w:
+        return text
+    out = text
+    while out and _text_w(draw, out + "…", font) > max_w:
+        out = out[:-1]
+    return (out + "…") if out else ""
+
+
+# 一天里这几件事最该出现在 A 屏首页：日程 → 作业 → 便签。
+# 注意：这里不要定义模块级 _WEEKDAY_CN —— 文件里已有同名全局，且后面还有一处
+# 重定义成「星期一」样式，重复定义会把下方既有代码的取词悄悄改掉。
+
+
+def _today_rows(cfg_root: dict, limit: int = 4) -> tuple[list[str], int]:
+    """取「今天」的待办行：当日日程 + 未完成作业 + 便签。返回 (前 limit 条, 总数)。"""
+    content = cfg_root.get("content") or {}
+    today_key = date.today().isoformat()
+    rows: list[str] = []
+    events = [x for x in (content.get("familySchedule") or []) if isinstance(x, dict)]
+    events = [x for x in events if str(x.get("date") or "")[:10] == today_key]
+    events.sort(key=lambda x: str(x.get("time") or ""))
+    for ev in events:
+        name = str(ev.get("title") or ev.get("text") or "").strip()
+        if not name:
+            continue
+        clock = str(ev.get("time") or "").strip()
+        rows.append(f"{clock} {name}".strip() if clock else name)
+    for item in content.get("homework") or []:
+        if isinstance(item, dict) and not item.get("done"):
+            text = str(item.get("text") or "").strip()
+            if text:
+                rows.append(f"作业 · {text}")
+    for item in content.get("notes") or []:
+        if isinstance(item, dict):
+            text = str(item.get("text") or "").strip()
+            if text:
+                rows.append(f"便签 · {text}")
+    return rows[:limit], len(rows)
+
+
+def _render_xiaowu_today(cfg_root: dict, a_cfg: dict, w: int, h: int, colors: int,
+                         battery: Optional[int] = None, mac: str = "") -> Image.Image:
+    """系统场景 A 屏：小悟今日首页。
+
+    与「欢迎页」的分工：欢迎页是出厂/未绑定阶段的引导（怎么唤醒、去哪配网），
+    本页是绑定之后的日常首页——日期 + 今天的安排 + 电量，内容一变屏上就变。
+    黑白 1bpp 友好：只用实心/描边，不依赖灰阶，也不使用任何彩色像素。
+    """
+    s = w / 400.0
+    img = _palette_p_image(w, h, colors) if colors >= 3 else Image.new("1", (w, h), 1)
+    draw = ImageDraw.Draw(img)
+    fg = 0
+    f_brand = _load_serif(max(16, int(28 * s)), bold=True)
+    f_sub = _load_cjk(max(9, int(11 * s)))
+    f_meta = _load_cjk(max(8, int(10 * s)))
+    f_section = _load_cjk(max(11, int(13 * s)))
+    f_body = _load_cjk(max(11, int(14 * s)))
+
+    now = datetime.now()
+    # 局部常量，避免与模块级 _WEEKDAY_CN（且被多处重定义）互相污染。
+    weekday_cn = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")[now.weekday()]
+    title = (str(a_cfg.get("title") or "小悟今日")).strip()[:8] or "小悟今日"
+
+    # ── 顶部：英文小标 + 日期/星期 ──────────────────────────
+    draw.text((int(16 * s), int(10 * s)), "XIAOWU AI", fill=fg, font=f_meta)
+    stamp = f"{now.month}月{now.day}日 {weekday_cn}"
+    draw.text((w - int(16 * s) - _text_w(draw, stamp, f_meta), int(10 * s)),
+              stamp, fill=fg, font=f_meta)
+    draw.line([(int(16 * s), int(26 * s)), (w - int(16 * s), int(26 * s))],
+              fill=fg, width=1)
+
+    # ── 品牌行：logo + 标题 + 副标（左对齐，logo 贴边）────────
+    logo_h = int(58 * s)
+    logo_w = int(logo_h * 0.715)
+    bx, by = int(16 * s), int(36 * s)
+    if not _paste_logo(img, bx, by, logo_w, logo_h, fg):
+        # logo 资源缺失时的兜底：实心圆 + 两条白线，保持品牌位不空着
+        r = logo_h // 2
+        draw.ellipse([bx, by, bx + 2 * r, by + 2 * r], fill=fg)
+        for i in range(2):
+            ly = by + int(r * (0.7 + i * 0.45))
+            draw.line([(bx + int(r * 0.4), ly), (bx + int(r * 1.6), ly)],
+                      fill=1, width=max(1, int(2 * s)))
+    tx = bx + logo_w + int(14 * s)
+    draw.text((tx, by + int(2 * s)), title, fill=fg, font=f_brand)
+    draw.text((tx, by + int(38 * s)), "森穹小悟 · 双屏墨水屏", fill=fg, font=f_sub)
+
+    draw.line([(int(16 * s), int(104 * s)), (w - int(16 * s), int(104 * s))],
+              fill=fg, width=max(1, int(2 * s)))
+
+    # ── 今日安排 ────────────────────────────────────────────
+    rows, total = _today_rows(cfg_root)
+    draw.text((int(16 * s), int(112 * s)), "今日安排", fill=fg, font=f_section)
+    count_text = f"{total} 项"
+    draw.text((w - int(16 * s) - _text_w(draw, count_text, f_meta), int(114 * s)),
+              count_text, fill=fg, font=f_meta)
+
+    row_top = int(136 * s)
+    step = int(30 * s)
+    text_x = int(36 * s)
+    max_text_w = w - text_x - int(16 * s)
+    if rows:
+        for index, row in enumerate(rows):
+            y = row_top + index * step
+            box = int(12 * s)
+            draw.rectangle([int(16 * s), y + int(3 * s), int(16 * s) + box, y + int(3 * s) + box],
+                           outline=fg, width=max(1, int(2 * s)))
+            draw.text((text_x, y), _fit_text_to_width(draw, row, f_body, max_text_w),
+                      fill=fg, font=f_body)
+    else:
+        draw.text((int(16 * s), row_top + int(2 * s)), "今天没有安排",
+                  fill=fg, font=f_body)
+        draw.text((int(16 * s), row_top + int(26 * s)), "长按 OK 键，说「你好小悟」",
+                  fill=fg, font=f_meta)
+
+    # ── 底部：尾号 / 网址（居中）/ 电量（右对齐）────────────
+    draw.line([(int(16 * s), h - int(26 * s)), (w - int(16 * s), h - int(26 * s))],
+              fill=fg, width=1)
+    tail = str(mac or "").replace(":", "").strip().upper()
+    if len(tail) >= 4 and all(c in "0123456789ABCDEF" for c in tail):
+        draw.text((int(16 * s), h - int(19 * s)), f"尾号 {tail[-4:]}",
+                  fill=fg, font=f_meta)
+    site = "xiaowuai.vip"
+    draw.text(((w - _text_w(draw, site, f_meta)) // 2, h - int(19 * s)),
+              site, fill=fg, font=f_meta)
+    if battery is not None:
+        _draw_battery_with_text(draw, w - int(16 * s), h - int(14 * s), s,
+                                battery, f_meta, fg)
+    return img
+
+
 def render_scene_modules(title: str, modules: list, w: int, h: int, colors: int,
                          footer: str = "") -> Image.Image:
     scale = w / 400.0
@@ -1116,6 +1380,290 @@ def render_family_express_bills(express: list[dict], bills: list[dict], w: int, 
     return img
 
 
+# ── 家庭看板：A 屏「今日总览」/ B 屏「本周周历」──────────────────────
+# 版式与内容后台「双屏配置」页的实时预览（FamilyTodayScreen / FamilyWeekScreen）
+# 一一对应。此前用通用 render_scene_modules 把配置里的「模块名」当正文画出来，
+# 结果后台预览是三栏卡片、屏上却是一列"月/周视图、成员标记"，用户没法把两边对上。
+_WEEKDAY_CN = ("星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日")
+_WEEKDAY_SHORT = ("一", "二", "三", "四", "五", "六", "日")
+
+
+def _family_accent(colors: int) -> int:
+    """家庭看板的强调色索引：三色=红(2)，四色=红(3)，黑白屏无彩色。"""
+    if colors >= 4:
+        return 3
+    if colors >= 3:
+        return 2
+    return 0
+
+
+def _family_events(content: dict) -> list[dict]:
+    return [x for x in (content.get("familySchedule") or []) if isinstance(x, dict)]
+
+
+def _family_member_count(content: dict) -> int:
+    return max(1, len([x for x in (content.get("familyMembers") or []) if x]))
+
+
+def render_family_today(content: dict, a_cfg: dict, w: int, h: int, colors: int,
+                        battery: Optional[int] = None) -> Image.Image:
+    """A 屏「家庭今日总览」：顶部日期、留档的三栏卡片（日程 / 待办 / 留言）。
+
+    版式对齐内容后台「双屏配置」页的 FamilyTodayScreen，保证后台看到的就是
+    屏上显示的。battery 参数仅为接口兼容保留 —— 后台预览不画电量，这里也不画，
+    否则两边又会不一致。
+    """
+    _ = battery
+    scale = scale_of(w)
+    img = _new_canvas(w, h, colors)
+    draw = ImageDraw.Draw(img)
+    fg = 0
+    accent = _family_accent(colors)
+    today = date.today()
+    today_key = today.isoformat()
+
+    events = _family_events(content)
+    today_events = sorted(
+        [x for x in events if str(x.get("date") or "") == today_key],
+        key=lambda x: str(x.get("time") or "99:99"))
+    upcoming = sorted(
+        [x for x in events if str(x.get("date") or "") >= today_key],
+        key=lambda x: (str(x.get("date") or "9999"), str(x.get("time") or "")))
+    shown = (today_events or upcoming)[:4]
+    todos = [x for x in (content.get("homework") or [])
+             if isinstance(x, dict) and not x.get("done")][:3]
+    notes = sorted([x for x in (content.get("notes") or []) if isinstance(x, dict)],
+                   key=lambda x: str(x.get("date") or ""), reverse=True)
+    note = notes[0] if notes else None
+    mode = str(a_cfg.get("mode") or "family")
+
+    f_date = _load_cjk(max(15, int(19 * scale)), bold=True)
+    f_week = _load_cjk(max(9, int(11 * scale)))
+    f_sec = _load_cjk(max(10, int(12 * scale)), bold=True)
+    f_body = _load_cjk(max(9, int(12 * scale)))
+    f_meta = _load_cjk(max(8, int(10 * scale)))
+
+    pad = int(10 * scale)
+    line_w = max(1, int(1 * scale))
+
+    # —— 顶部：日期 + 星期 + 右上角概览 ——
+    date_str = f"{today.month}月{today.day}日"
+    draw.text((pad + int(2 * scale), int(4 * scale)), date_str, fill=fg, font=f_date)
+    dx = pad + int(2 * scale) + _text_w(draw, date_str, f_date) + int(7 * scale)
+    draw.text((dx, int(10 * scale)), _WEEKDAY_CN[today.weekday()], fill=fg, font=f_week)
+    head_note = "家庭今日总览"
+    draw.text((w - pad - _text_w(draw, head_note, f_meta), int(11 * scale)),
+              head_note, fill=fg, font=f_meta)
+    head_bottom = int(31 * scale)
+    draw.line([(pad, head_bottom), (w - pad, head_bottom)], fill=fg,
+              width=max(1, int(2 * scale)))
+
+    # —— 主体：左侧日程卡片（62%），右侧「今日待办」+「最新留言」两张卡片 ——
+    footer_h = int(14 * scale)
+    body_top = head_bottom + int(5 * scale)
+    body_bottom = h - footer_h - int(3 * scale)
+    gap = int(6 * scale)
+    left_x0 = pad
+    left_x1 = pad + int((w - 2 * pad - gap) * 0.62)
+    right_x0 = left_x1 + gap
+    right_x1 = w - pad
+    box_pad = int(5 * scale)
+
+    # 左栏卡片
+    draw.rectangle([left_x0, body_top, left_x1, body_bottom], outline=fg, width=line_w)
+    if mode == "family-todos":
+        sec_title, sec_right = "待办与便签", f"{len(todos)} 项待办"
+    elif today_events:
+        sec_title, sec_right = f"今天，全家 {len(today_events)} 项安排", "今日"
+    else:
+        sec_title, sec_right = "近期家庭安排", "接下来"
+    inner_left = left_x0 + box_pad
+    inner_right = left_x1 - box_pad
+    draw.text((inner_left, body_top + int(4 * scale)),
+              _ellipsis_text(draw, sec_title, f_sec,
+                             inner_right - inner_left - int(30 * scale)),
+              fill=fg, font=f_sec)
+    draw.text((inner_right - _text_w(draw, sec_right, f_meta), body_top + int(6 * scale)),
+              sec_right, fill=fg, font=f_meta)
+    row_top = body_top + int(19 * scale)
+    draw.line([(left_x0, row_top), (left_x1, row_top)], fill=fg, width=line_w)
+
+    rows = shown if mode != "family-todos" else [
+        {"time": "待办", "title": t.get("text") or "", "member": "家庭任务"} for t in todos]
+    if rows:
+        avail = body_bottom - row_top - int(3 * scale)
+        row_h = max(int(24 * scale), min(int(32 * scale), avail // max(1, len(rows))))
+        for index, item in enumerate(rows[:4]):
+            y = row_top + index * row_h
+            if index < len(rows) - 1 and y + row_h < body_bottom - int(2 * scale):
+                draw.line([(inner_left, y + row_h), (inner_right, y + row_h)],
+                          fill=fg, width=1)
+            tstr = str(item.get("time") or
+                       ("全天" if item.get("date") == today_key else "—"))[:5]
+            draw.text((inner_left, y + int(6 * scale)), tstr, fill=fg, font=f_meta)
+            dot_x = inner_left + int(33 * scale)
+            draw.ellipse([dot_x, y + int(8 * scale), dot_x + int(5 * scale),
+                          y + int(13 * scale)], fill=accent if colors >= 3 else fg)
+            title_x = dot_x + int(8 * scale)
+            max_w = inner_right - title_x
+            draw.text((title_x, y + int(1 * scale)),
+                      _ellipsis_text(draw, str(item.get("title") or ""), f_body, max_w),
+                      fill=fg, font=f_body)
+            sub = " · ".join([str(x) for x in (item.get("member") or "全家",
+                                               item.get("note")) if x])
+            if sub:
+                draw.text((title_x, y + int(13 * scale)),
+                          _ellipsis_text(draw, sub, f_meta, max_w), fill=fg, font=f_meta)
+    else:
+        draw.text((inner_left, row_top + int(8 * scale)), "今天还没有安排",
+                  fill=fg, font=f_body)
+
+    # 右上：今日待办卡片
+    todo_bottom = body_top + int((body_bottom - body_top) * 0.40)
+    draw.rectangle([right_x0, body_top, right_x1, todo_bottom], outline=fg, width=line_w)
+    draw.text((right_x0 + box_pad, body_top + int(4 * scale)), "今日待办",
+              fill=fg, font=f_sec)
+    todo_count = f"{len(todos)} 项"
+    draw.text((right_x1 - box_pad - _text_w(draw, todo_count, f_meta),
+               body_top + int(6 * scale)), todo_count, fill=fg, font=f_meta)
+    y = body_top + int(19 * scale)
+    draw.line([(right_x0, y), (right_x1, y)], fill=fg, width=line_w)
+    y += int(4 * scale)
+    if todos:
+        for todo in todos[:2]:
+            bx = right_x0 + box_pad
+            draw.rectangle([bx, y + int(2 * scale), bx + int(5 * scale), y + int(7 * scale)],
+                           outline=fg, width=1)
+            draw.text((bx + int(8 * scale), y),
+                      _ellipsis_text(draw, str(todo.get("text") or ""), f_body,
+                                     right_x1 - box_pad - bx - int(9 * scale)),
+                      fill=fg, font=f_body)
+            y += int(13 * scale)
+    else:
+        draw.text((right_x0 + box_pad, y), "暂无待办", fill=fg, font=f_meta)
+
+    # 右下：最新留言卡片
+    note_box_top = todo_bottom + int(4 * scale)
+    draw.rectangle([right_x0, note_box_top, right_x1, body_bottom],
+                   outline=fg, width=line_w)
+    draw.text((right_x0 + box_pad, note_box_top + int(4 * scale)), "最新留言",
+              fill=fg, font=f_sec)
+    sender = str((note or {}).get("sender") or "家庭")
+    draw.text((right_x1 - box_pad - _text_w(draw, sender, f_meta),
+               note_box_top + int(6 * scale)), sender, fill=fg, font=f_meta)
+    line_y = note_box_top + int(18 * scale)
+    draw.line([(right_x0, line_y), (right_x1, line_y)], fill=fg, width=line_w)
+    text = str((note or {}).get("text") or "家人留言会显示在这里")
+    lines = _wrap_text(draw, text, f_body, right_x1 - right_x0 - 2 * box_pad)[:6]
+    for index, line in enumerate(lines):
+        draw.text((right_x0 + box_pad, line_y + int(4 * scale) + index * int(12 * scale)),
+                  line, fill=fg, font=f_body)
+
+    # —— 底部状态条 ——
+    footer_y = h - footer_h
+    draw.line([(pad, footer_y), (w - pad, footer_y)], fill=fg, width=1)
+    draw.text((pad + int(2 * scale), footer_y + int(3 * scale)), "家庭日程",
+              fill=fg, font=f_meta)
+    right_text = f"{_family_member_count(content)} 位成员 · 已同步"
+    draw.text((w - pad - int(2 * scale) - _text_w(draw, right_text, f_meta),
+               footer_y + int(3 * scale)), right_text, fill=fg, font=f_meta)
+    return img
+
+
+def render_family_week(content: dict, w: int, h: int, colors: int) -> Image.Image:
+    """B 屏「家庭周历」：本周 7 天列 + 每天事件块。
+
+    对应后台预览 FamilyWeekScreen：顶部本周日期范围、7 列（周几 + 日期，今天反色）、
+    每列最多 3 个事件块，底部本周安排数与成员数。
+    """
+    scale = scale_of(w)
+    img = _new_canvas(w, h, colors)
+    draw = ImageDraw.Draw(img)
+    fg = 0
+    accent = _family_accent(colors)
+    today = date.today()
+    monday = today - timedelta(days=today.weekday())
+    days = [monday + timedelta(days=i) for i in range(7)]
+    week_start, week_end = days[0], days[-1]
+    week_events = [x for x in _family_events(content)
+                   if week_start.isoformat() <= str(x.get("date") or "") <= week_end.isoformat()]
+
+    f_head = _load_cjk(max(12, int(16 * scale)), bold=True)
+    f_day = _load_cjk(max(8, int(9 * scale)), bold=True)
+    f_body = _load_cjk(max(7, int(8 * scale)))
+    f_meta = _load_cjk(max(7, int(9 * scale)))
+
+    pad = int(10 * scale)
+    head_bottom = int(28 * scale)
+    title = "本周安排"
+    draw.text((pad + int(2 * scale), int(5 * scale)), title, fill=fg, font=f_head)
+    hx = pad + int(2 * scale) + _text_w(draw, title, f_head) + int(8 * scale)
+    range_text = f"{week_start.month}月{week_start.day}日 — {week_end.month}月{week_end.day}日"
+    draw.text((hx, int(10 * scale)), range_text, fill=fg, font=f_meta)
+    right_note = "家庭周历"
+    draw.text((w - pad - _text_w(draw, right_note, f_meta), int(10 * scale)),
+              right_note, fill=fg, font=f_meta)
+    draw.line([(pad, head_bottom), (w - pad, head_bottom)], fill=fg,
+              width=max(1, int(2 * scale)))
+
+    footer_h = int(14 * scale)
+    body_top = head_bottom + int(3 * scale)
+    body_bottom = h - footer_h - int(2 * scale)
+    col_w = (w - 2 * pad) // 7
+
+    # 列头：周几 + 日期数字。今天整格反色，块高必须容得下两行字。
+    day_head_h = int(24 * scale)
+    for index, day in enumerate(days):
+        x0 = pad + index * col_w
+        x1 = x0 + col_w
+        is_today = day == today
+        if is_today:
+            draw.rectangle([x0 + int(1 * scale), body_top, x1 - int(1 * scale),
+                            body_top + day_head_h], fill=fg)
+        text_color = 1 if is_today else fg
+        week_label = _WEEKDAY_SHORT[day.weekday()]
+        draw.text((x0 + (col_w - _text_w(draw, week_label, f_meta)) // 2,
+                   body_top + int(2 * scale)), week_label, fill=text_color, font=f_meta)
+        day_label = str(day.day)
+        draw.text((x0 + (col_w - _text_w(draw, day_label, f_day)) // 2,
+                   body_top + int(12 * scale)), day_label, fill=text_color, font=f_day)
+        if index:
+            draw.line([(x0, body_top), (x0, body_bottom)], fill=fg, width=1)
+
+    # 事件块：每列最多 3 个，超出就截断
+    ev_top = body_top + day_head_h + int(2 * scale)
+    for index, day in enumerate(days):
+        x0 = pad + index * col_w + int(1 * scale)
+        x1 = pad + (index + 1) * col_w - int(1 * scale)
+        inner_w = x1 - x0 - int(12 * scale)
+        y = ev_top
+        day_events = [x for x in week_events
+                      if str(x.get("date") or "") == day.isoformat()][:3]
+        for item in day_events:
+            lines = _wrap_text(draw, str(item.get("title") or ""), f_body, inner_w)[:2]
+            block_h = int(4 * scale) + len(lines) * int(10 * scale)
+            if y + block_h > body_bottom:
+                break
+            outline = accent if colors >= 3 else fg
+            # 只留细边框：彩色屏上画实心色条会压住文字首字，
+            # 400px 宽度下 7 列太窄，留白比色块更重要。
+            draw.rectangle([x0, y, x1, y + block_h], outline=outline, width=1)
+            ty = y + int(3 * scale)
+            for line in lines:
+                draw.text((x0 + int(5 * scale), ty), line, fill=fg, font=f_body)
+                ty += int(10 * scale)
+            y += block_h + int(2 * scale)
+
+    footer_y = h - footer_h
+    draw.line([(pad, footer_y), (w - pad, footer_y)], fill=fg, width=1)
+    draw.text((pad + int(2 * scale), footer_y + int(3 * scale)),
+              f"本周 {len(week_events)} 项安排", fill=fg, font=f_meta)
+    right_text = f"{_family_member_count(content)} 位家庭成员"
+    draw.text((w - pad - int(2 * scale) - _text_w(draw, right_text, f_meta),
+               footer_y + int(3 * scale)), right_text, fill=fg, font=f_meta)
+    return img
+
+
 def _draw_message_badge(img: Image.Image, unread: int, colors: int = 2) -> Image.Image:
     """在设备画面左下角叠加「未读留言」徽标。
 
@@ -1154,10 +1702,18 @@ def _render_dual_screen_inner(mac: str, screen: str, w: int, h: int, colors: int
     try:
         if screen == "A":
             cfg_root = dual_config or {}
-            scene_key = str(cfg_root.get("sceneKey") or "study")
+            scene_key = str(cfg_root.get("sceneKey") or DEFAULT_SCENE_KEY)
             scene_cfg = (cfg_root.get("config") or {}).get(scene_key) or {}
             a_cfg = scene_cfg.get("a") or {}
-            mode = str(a_cfg.get("mode") or "notes")
+            # 系统场景 A 屏默认「小悟今日」首页（日期/今日安排/电量）——绑定后的
+            # 日常态；「欢迎页」保留给出厂与配网阶段，需要时在后台显式选择。
+            mode = str(a_cfg.get("mode") or ("xiaowu-today" if scene_key == "system" else "notes"))
+            # 系统场景 A 屏：欢迎页（品牌 + 唤醒方式 + 配置入口），不依赖任何内容数据。
+            if mode == "welcome":
+                return _render_welcome(w, h, colors, battery=battery, mac=mac)
+            if mode in ("xiaowu-today", "today"):
+                return _render_xiaowu_today(cfg_root, a_cfg, w, h, colors,
+                                            battery=battery, mac=mac)
             if mode == "published-app":
                 return _render_published_app(a_cfg, w, h, colors, screen="A")
             if mode == "pomodoro":
@@ -1195,23 +1751,13 @@ def _render_dual_screen_inner(mac: str, screen: str, w: int, h: int, colors: int
                     footer = f"共 {len(events)} 个纪念日"
                 else:
                     if mode == "family":
-                        weather = cfg_root.get("_runtime_weather") or {}
-                        todos = [x.get("text", "") for x in content.get("homework", []) if isinstance(x, dict) and not x.get("done")]
-                        shopping = [x.get("text", "") for x in content.get("familyShopping", []) if isinstance(x, dict) and not x.get("done")]
-                        anniversaries = [f"{x.get('date', '')} {x.get('title', '')}" for x in content.get("familyAnniversaries", []) if isinstance(x, dict)]
-                        rows = [f"天气 {weather.get('weather_str', '--')}"]
-                        rows += [f"取件码 {x.get('pickupCode') or x.get('trackingNo') or '待补'} · {x.get('pickupPoint') or x.get('item') or '包裹'}" for x in express[:2]]
-                        rows += [f"待缴 {x.get('name') or x.get('category') or '账单'} · ¥{x.get('amount', 0)}" for x in bills[:1]]
-                        rows += [f"待办 {x}" for x in todos[:2]]
-                        rows += [f"日程 {x.get('date', '')} {x.get('time', '')} {x.get('title', '')}" for x in schedule[:2]]
-                        rows += [f"采购 {x}" for x in shopping[:1]]
-                        rows += [f"纪念日 {x}" for x in anniversaries[:1]]
-                        rows = rows[:6]
-                        footer = f"家庭数据总览 · 日程 {len(schedule)} 项"
-                    else:
-                        rows = list(modules)
-                        footer = "家庭共享提醒"
-                return render_scene_modules("家庭提醒" if mode == "family" else (a_cfg.get("title") or "家庭提醒"), rows, w, h, colors, footer)
+                        # 与内容后台「双屏配置」页预览同版式：三栏家庭今日总览
+                        # （左栏近期安排 / 右上今日待办 / 右下最新留言）。
+                        return render_family_today(content, a_cfg, w, h, colors,
+                                                   battery=battery)
+                    rows = list(modules)
+                    footer = "家庭共享提醒"
+                return render_scene_modules(a_cfg.get("title") or "家庭提醒", rows, w, h, colors, footer)
             # 理财场景：A 屏自选行情 / 市场摘要（实时拉取东财公开接口，失败回落通用看板）
             if scene_key == "finance" and mode in ("finance-watch", "finance-summary", "finance-market"):
                 try:
@@ -1243,25 +1789,27 @@ def _render_dual_screen_inner(mac: str, screen: str, w: int, h: int, colors: int
             return render_notes(mac, w, h, dual_config, battery=battery)
         # B 屏
         cfg_root = dual_config or {}
-        scene_key = str(cfg_root.get("sceneKey") or "study")
+        scene_key = str(cfg_root.get("sceneKey") or DEFAULT_SCENE_KEY)
         scene_cfg = (cfg_root.get("config") or {}).get(scene_key) or {}
         b_cfg = scene_cfg.get("b") or {}
-        # 未配置设备的出厂默认：B 屏展示成都天气（A 屏由固件欢迎页引导去后台配置）。
-        b_mode = str(b_cfg.get("mode") or ("weather" if scene_key == "study" else "family" if scene_key == "family" else "health-plan" if scene_key == "health" else "finance-trend" if scene_key == "finance" else "office"))
+        # 未配置设备的出厂默认：系统场景 B 屏展示天气（A 屏是欢迎页引导去后台配置）。
+        b_mode = str(b_cfg.get("mode") or ("weather" if scene_key in ("system", "study") else "family" if scene_key == "family" else "health-plan" if scene_key == "health" else "finance-trend" if scene_key == "finance" else "office"))
         if b_mode == "published-app":
             return _render_published_app(b_cfg, w, h, colors, screen="B")
         if b_mode == "pomodoro":
             return _render_pomodoro(mac, b_cfg, w, h, colors, screen="B")
+        if b_mode == "album-tf":
+            # TF 卡相册由固件本地读卡刷屏（图片在设备上，后端拿不到）。
+            # 这里只做兜底：新固件会抢先渲染，旧固件/预览时给一张后台上传的相册图，
+            # 避免后台切到该模式看到空白。
+            return render_album(mac, w, h, colors, dual_config)
         if b_mode == "album":
             return render_album(mac, w, h, colors, dual_config)
         if scene_key == "family" and b_mode in ("calendar", "family"):
-            content = cfg_root.get("content") or {}
-            events = [x for x in content.get("familySchedule", []) if isinstance(x, dict)]
-            events.sort(key=lambda x: (str(x.get('date') or '9999'), str(x.get('time') or '')))
-            rows = [f"{x.get('date', '')} {x.get('time', '')} {x.get('title', '')}" for x in events[:6]]
-            if b_mode == "family":
-                rows = rows[:3] + [str(x) for x in (b_cfg.get("modules") or []) if str(x).strip()][:3]
-            return render_scene_modules("家庭共享看板" if b_mode == "family" else "家庭日程", rows or ["暂无家庭日程"], w, h, colors, f"共 {len(events)} 项安排")
+            # 与内容后台「双屏配置」页预览同版式：本周 7 天列 + 每天事件块。
+            # 旧实现把 b_cfg.modules（"月/周视图""成员标记"…）当正文画出来，
+            # 与后台预览的周历完全对不上。
+            return render_family_week(cfg_root.get("content") or {}, w, h, colors)
         # 理财场景：B 屏行情趋势 → 首只自选的日 K 蜡烛图（失败回落通用看板）
         if scene_key == "finance" and b_mode in ("finance-trend", "finance-kline", "finance-sectors"):
             try:
