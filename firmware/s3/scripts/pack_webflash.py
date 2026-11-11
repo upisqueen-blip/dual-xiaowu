@@ -82,13 +82,20 @@ def sha256_of(path: Path) -> str:
 
 
 def verify_merged(path: Path) -> None:
-    """粗校验：0x0 与 0x310000 必须是镜像魔数 0xE9，0x8000 是分区表 0xAA50。"""
+    """粗校验：0x0 与 0x310000 必须是镜像魔数 0xE9，0x8000 是分区表 0xAA50。
+
+    分区表魔数在镜像里按字节是 AA 50，按大端读才是 0xAA50；
+    这里比较原始字节，避免字节序写反导致校验恒失败。
+    """
     data = path.read_bytes()
     problems = []
     if data[0] != 0xE9:
         problems.append(f"0x0 魔数=0x{data[0]:02X}（期望 0xE9 bootloader）")
-    if int.from_bytes(data[0x8000:0x8002], "little") != 0xAA50:
-        problems.append("0x8000 不是分区表（期望 0xAA50）")
+    if data[0x8000:0x8002] != b"\xAA\x50":
+        problems.append(
+            "0x8000 不是分区表（期望字节 AA 50，实际 %s）"
+            % data[0x8000:0x8002].hex(" ").upper()
+        )
     if len(data) <= 0x310000:
         problems.append(f"文件仅 {len(data)} 字节，短于 app 偏移 0x310000")
     elif data[0x310000] != 0xE9:
