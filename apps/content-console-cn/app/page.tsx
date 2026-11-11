@@ -148,6 +148,11 @@ export default function DualConsole() {
   const [pairOpen, setPairOpen] = useState(false);
   const [toast, setToast] = useState("");
   const [savedAt, setSavedAt] = useState("");
+  // 新手引导用的两个真实信号：用户是否主动换过场景、是否真的下发过。
+  // 存 localStorage 是为了刷新页面后不倒退（后端没有「是否下发过」的字段）。
+  // 初始值必须与服务端渲染一致（false / 空），进 useEffect 再回填，避免水合不一致。
+  const [scenePicked, setScenePicked] = useState(false);
+  const [appliedAt, setAppliedAt] = useState("");
   const [sceneTick, setSceneTick] = useState(0);
   const [customSceneKeys, setCustomSceneKeys] = useState<string[]>([]);
   const [config, setConfig] = useState<Record<SceneKey, { a: ScreenConfig; b: ScreenConfig }>>(() =>
@@ -203,6 +208,8 @@ export default function DualConsole() {
 
   useEffect(() => {
     const raw = localStorage.getItem("xiaowu_dual_config");
+    setScenePicked(localStorage.getItem("xiaowu_scene_picked") === "1");
+    setAppliedAt(localStorage.getItem("xiaowu_applied_at") || "");
     if (raw) {
       try {
         const saved = JSON.parse(raw);
@@ -252,6 +259,11 @@ export default function DualConsole() {
         if (cancelled || !saved) return;
         if (saved.sceneKey && scenes[saved.sceneKey as SceneKey]) {
           setSceneKey(saved.sceneKey as SceneKey);
+          // 服务器上存的不是出厂默认场景，说明用户确实选过（换浏览器也认）。
+          if (saved.sceneKey !== "system") {
+            setScenePicked(true);
+            localStorage.setItem("xiaowu_scene_picked", "1");
+          }
         }
         if (saved.config) setConfig(() => normalizeConfig(saved.config));
         if (saved.content) applySavedContent(saved.content);
@@ -319,7 +331,15 @@ export default function DualConsole() {
 
   function chooseScene(key: SceneKey) {
     setSceneKey(key);
+    setScenePicked(true);
+    localStorage.setItem("xiaowu_scene_picked", "1");
     notify(`已切换到${scenes[key].name}场景，保存后同步到设备`);
+  }
+
+  function markApplied() {
+    const label = new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+    setAppliedAt(label);
+    localStorage.setItem("xiaowu_applied_at", label);
   }
 
   function updateScreen(screen: "a" | "b", patch: Partial<ScreenConfig>) {
@@ -372,6 +392,7 @@ export default function DualConsole() {
     try {
       await api(`/api/device/${encodeURIComponent(selectedDevice.mac)}/dual-config`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
       const colorLabel = `A 屏${panelColorName(screen.aColors)} / B 屏${panelColorName(screen.bColors)}`;
+      markApplied();
       notify(`已保存并下发：${colorLabel}渲染（${selectedDevice.nickname || selectedDevice.mac}），设备最迟 1 分钟内刷新，先 A 屏再 B 屏`);
     } catch (error) {
       const msg = error instanceof Error && error.message ? error.message : "网络错误";
@@ -437,7 +458,7 @@ export default function DualConsole() {
 
         <div className="content">
           {loading ? <div className="loading"><LoaderCircle className="spin"/>正在连接 小悟AI…</div> : null}
-          {!loading && nav === "dashboard" ? <Dashboard user={user} devices={devices} sceneKey={sceneKey} selectedDevice={selectedDevice} setNav={setNav} openAuth={() => setAuthOpen(true)} openPair={() => setPairOpen(true)} /> : null}
+          {!loading && nav === "dashboard" ? <Dashboard user={user} devices={devices} sceneKey={sceneKey} selectedDevice={selectedDevice} setNav={setNav} openAuth={() => setAuthOpen(true)} openPair={() => setPairOpen(true)} scenePicked={scenePicked} appliedAt={appliedAt} aRefresh={config[sceneKey]?.a?.refresh || ""} bRefresh={config[sceneKey]?.b?.refresh || ""} /> : null}
           {!loading && nav === "scenes" ? <SceneCenter selected={sceneKey} choose={chooseScene} openConfig={() => setNav("screens")} onAssign={assignPublishedApp} hasDevice={!!selectedDevice} notify={notify} customSceneKeys={customSceneKeys} onCreate={createUserScene} onDelete={deleteUserScene} loggedIn={!!user} /> : null}
           {!loading && nav === "screens" ? <ScreenEditor scene={scene} sceneKey={sceneKey} value={config[sceneKey]} update={updateScreen} save={saveConfiguration} savedAt={savedAt} content={content} apply={applyToDevice} hasDevice={!!selectedDevice} deviceMac={selectedDevice?.mac || ""} screen={screen} setScreen={setScreen} /> : null}
           {!loading && nav === "content" ? <ContentStudio content={content} setContent={setContent} save={saveConfiguration} savedAt={savedAt} notify={notify} apply={applyToDevice} hasDevice={!!selectedDevice} deviceMac={selectedDevice?.mac || ""} screen={screen} sceneKey={sceneKey} aMode={config[sceneKey].a.mode || defaultMode(sceneKey, "a")} bMode={config[sceneKey].b.mode || defaultMode(sceneKey, "b")} user={user} device={selectedDevice} /> : null}
@@ -459,13 +480,44 @@ export default function DualConsole() {
   );
 }
 
-function Dashboard({ user, devices, sceneKey, selectedDevice, setNav, openAuth, openPair }: { user: User | null; devices: Device[]; sceneKey: SceneKey; selectedDevice?: Device; setNav: (v: NavKey) => void; openAuth: () => void; openPair: () => void }) {
+// 「刷新频率」下拉里只有带数字+周期的文案才会被后端解析成分钟数（见后端
+// parse_refresh_minutes）。「随双屏刷新 / 每次唤醒 / 自定义」都不带周期，
+// 新手引导据此判断用户到底设没设过。
+function isScheduledRefresh(text?: string) {
+  return !!text && /\d+\s*(秒钟|秒|分钟|分|小时|钟头|天)/.test(text);
+}
+
+function Dashboard({ user, devices, sceneKey, selectedDevice, setNav, openAuth, openPair, scenePicked, appliedAt, aRefresh, bRefresh }: { user: User | null; devices: Device[]; sceneKey: SceneKey; selectedDevice?: Device; setNav: (v: NavKey) => void; openAuth: () => void; openPair: () => void; scenePicked: boolean; appliedAt: string; aRefresh: string; bRefresh: string }) {
   const activeScene = scenes[sceneKey];
+  // 「随双屏刷新」表示 A 屏跟随 B 屏周期，算已设置；其余非周期文案（每次唤醒 /
+  // 自定义）后端拿不到分钟数，只能走默认值，所以在新手引导里算未设置。
+  const refreshReady = (isScheduledRefresh(aRefresh) || aRefresh.includes("随双屏")) && isScheduledRefresh(bRefresh);
+  const steps = [
+    { key: "device", title: "绑定设备", hint: "配对码或机身 MAC", done: devices.length > 0, cta: "去绑定", act: openPair },
+    { key: "scene", title: "选一个场景", hint: `${Object.keys(presetScenes).length} 套模板，A/B 屏可再微调`, done: scenePicked, cta: "去选择", act: () => setNav("scenes") },
+    { key: "refresh", title: "刷新频率", hint: `A ${aRefresh || "未设置"} · B ${bRefresh || "未设置"}`, done: refreshReady, cta: "去设置", act: () => setNav("screens") },
+    { key: "apply", title: "下发到屏幕", hint: appliedAt ? `最近下发 ${appliedAt}` : "点「应用到设备」即出图", done: !!appliedAt, cta: "去下发", act: () => setNav("screens") },
+  ];
+  const doneCount = steps.filter((s) => s.done).length;
   return <>
     <section className="welcome">
       <div><span className="kicker">GOOD AFTERNOON</span><h2>{user ? `${user.username}，今天想让双屏显示什么？` : "把重要的信息，安静地放在眼前。"}</h2><p>{user ? "场景模板负责开始，A/B 屏仍可独立微调。" : "登录现有 小悟AI 账号，继续管理设备、绑定关系与双屏场景。"}</p></div>
       <div className="welcome-actions">{user ? <><button className="button primary" onClick={() => setNav("scenes")}><Sparkles size={16}/>选择场景</button><button className="button light" onClick={openPair}><Link2 size={16}/>绑定新设备</button></> : <button className="button primary" onClick={openAuth}>登录 小悟AI 账号</button>}</div>
     </section>
+    {/* 未登录只给登录入口，不抛任务清单——否则访客看到的是「1/4 已完成」这种无从下手的进度 */}
+    {user && doneCount < steps.length ? <section className="onboard">
+      <div className="onboard-head">
+        <div><span className="kicker">首次配置</span><h3>{doneCount === 0 ? "四步把内容送上双屏" : `还差 ${steps.length - doneCount} 步就出图了`}</h3><p>按顺序走完，屏幕会自动刷新，不需要改固件或连线。</p></div>
+        <div className="onboard-count"><b>{doneCount}</b><span>/ {steps.length}</span></div>
+      </div>
+      <ol className="onboard-steps">
+        {steps.map((s, i) => <li key={s.key} className={s.done ? "done" : ""}>
+          <span className="onboard-idx">{s.done ? <Check size={13}/> : i + 1}</span>
+          <div><b>{s.title}</b><small>{s.hint}</small></div>
+          {s.done ? <em>已完成</em> : <button className="button sm ghost" onClick={s.act}>{s.cta}</button>}
+        </li>)}
+      </ol>
+    </section> : null}
     <section className="stats">
       <Stat icon={<Cpu/>} label={devices.some((d)=>d.role==="admin")?"全部设备":"我的设备"} value={String(devices.length)} note={devices.length ? (devices.some((d)=>d.role==="admin") ? "全平台设备" : "已接入当前账号") : "等待绑定"}/>
       <Stat icon={<Wifi/>} label="当前状态" value={selectedDevice?.is_online ? "在线" : "离线"} note={selectedDevice ? selectedDevice.mac : "尚未选择设备"}/>

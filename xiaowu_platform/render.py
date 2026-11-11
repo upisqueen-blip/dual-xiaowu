@@ -225,6 +225,72 @@ def resolve_dual_colors(dual_config: Optional[dict],
     return default, "default"
 
 
+# ——— 刷新周期 ———
+# 内容后台的「刷新频率」是文案枚举（"每 30 分钟"），历史上只写进配置、从未被
+# 下发链路读取：/api/render 一直返回写死的 A=5 / B=30 分钟，用户在下拉里改什么
+# 都不生效。这里把它变成服务端真实决策，并做上下限保护：墨水屏全刷一次 20~30 秒，
+# 低于 2 分钟等于持续刷屏（残影 + 老化），超过 24 小时也没有更慢的必要。
+REFRESH_MIN_MINUTES = 2
+REFRESH_MAX_MINUTES = 24 * 60
+
+_REFRESH_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(秒钟|秒|分钟|分|小时|钟头|天)")
+_REFRESH_UNIT_MINUTES = {"秒钟": 1 / 60, "秒": 1 / 60, "分钟": 1, "分": 1,
+                         "小时": 60, "钟头": 60, "天": 24 * 60}
+
+
+def parse_refresh_minutes(text: Any) -> Optional[int]:
+    """把「每 30 分钟 / 每12小时 / 30 分钟」解析成分钟数，解析不出返回 None。
+
+    「随双屏刷新」「每次唤醒」「自定义」这类非周期文案一律视为未设置，
+    由调用方按默认周期兜底——硬给一个数字反而会覆盖用户原来的意图。
+    """
+    if not isinstance(text, str):
+        return None
+    matched = _REFRESH_RE.search(text.replace(" ", ""))
+    if not matched:
+        return None
+    minutes = float(matched.group(1)) * _REFRESH_UNIT_MINUTES[matched.group(2)]
+    if minutes <= 0:
+        return None
+    return max(REFRESH_MIN_MINUTES, min(REFRESH_MAX_MINUTES, int(round(minutes))))
+
+
+def _scene_screens(dual_config: Optional[dict], scene_key: Optional[str] = None) -> dict:
+    """取某场景的 `{a: {...}, b: {...}}`；sceneKey 缺失时若只有一个场景就用它。"""
+    if not isinstance(dual_config, dict):
+        return {}
+    config = dual_config.get("config")
+    if not isinstance(config, dict):
+        return {}
+    key = scene_key or dual_config.get("sceneKey")
+    node = config.get(key) if isinstance(key, str) else None
+    if not isinstance(node, dict):
+        if len(config) != 1:
+            return {}
+        node = next(iter(config.values()))
+    return node if isinstance(node, dict) else {}
+
+
+def refresh_minutes_from_config(dual_config: Optional[dict],
+                                screen: str = "A",
+                                default: int = 5,
+                                scene_key: Optional[str] = None) -> tuple[int, str]:
+    """读取当前场景里某块屏的刷新周期，返回 (分钟, 来源)。
+
+    优先级：后台该场景该屏的 `refresh` > 默认值（A 屏 5 分钟 / B 屏 30 分钟）。
+    来源串会随响应头回给固件侧日志，用于排查「后台改了下拉但屏没变」。
+    """
+    which = _norm_screen(screen)
+    screens = _scene_screens(dual_config, scene_key)
+    node = screens.get(which.lower())
+    if not isinstance(node, dict):
+        return default, "default"
+    minutes = parse_refresh_minutes(node.get("refresh"))
+    if minutes is None:
+        return default, "default"
+    return minutes, "console"
+
+
 def _new_canvas(w: int, h: int, colors: int = 2) -> Image.Image:
     """白底画布：彩色屏必须用调色板图（索引 1 = 白），不能画在 mode "1" 上。
 

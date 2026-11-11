@@ -28,6 +28,7 @@ from .render import (
     image_to_png_bytes,
     image_to_raw_2bpp,
     image_to_raw_4bpp,
+    refresh_minutes_from_config,
     render_dual_screen,
     render_error,
     render_unbound,
@@ -260,10 +261,15 @@ def render(
             out_media = "image/bmp"
 
     elapsed_ms = int((datetime.now(UTC) - start_time).total_seconds() * 1000)
+    # 刷新周期读后台当前场景里该屏的「刷新频率」，不再写死 5 / 30 分钟。
+    # 拿不到（老配置没这个字段 / 文案是「随双屏刷新」）就按默认值兜底。
+    refresh_minutes, refresh_source = refresh_minutes_from_config(
+        dual_cfg, screen, default=5 if screen == "A" else 30)
     headers = {
         "X-Render-Time-Ms": str(elapsed_ms),
         "X-Mode-Id": str(persona or ""),
-        "X-Refresh-Minutes": "5" if screen == "A" else "30",
+        "X-Refresh-Minutes": str(refresh_minutes),
+        "X-Refresh-Source": refresh_source,
         # A 屏换了彩色座之后这里不再是固定 2，固件据此打日志核对实际出图色数。
         "X-Panel-Colors": str(eff_colors),
         "X-Colors-Source": colors_source,
