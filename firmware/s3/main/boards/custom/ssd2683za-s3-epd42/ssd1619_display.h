@@ -35,13 +35,6 @@ public:
     // 已配置 InkSight/双屏时跳过它，让网络图成为开机第一屏，避免双闪。
     void ShowBootHome();
 
-    // A 屏（FPC1）纯定时自证：完全不依赖 BUSY 判据，依次刷「全黑 / 全白 /
-    // 上黑下白」三张图，每张 10 秒并打印 BUSY 采样轨迹。仅由
-    // config.h 的 EPD_A42_PROBE_TEST 在启动时调用一次。
-    void RunPanelProbe();
-    // 纯色循环自检（全黑/全白各两次），由 EPD_A42_COLOR_TEST 控制。
-    void RunColorCycleTest();
-
     // 直接用 caller 提供的帧缓冲刷新画面。
     // frame: 50*300=15000 字节，1-bit/行/MSB 左白 1/黑 0。
     // partial=true: 差分快刷；false: 全刷清残影。

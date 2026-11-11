@@ -1850,71 +1850,6 @@ private:
     }
 
 public:
-#if EPD_DUAL_BWR_TEST
-    // 双三色屏硬件自检。
-    // 两块座子插同型号三色屏时，用同一份驱动、同一张图分别下发，只观察玻璃。
-    // 这样能一次分清三种情况：
-    //   · 两边都变   → 两个座子、两块屏、共用总线全部正常；
-    //   · 只有一边变 → 不变的那一边是屏或它的排线；
-    //   · 两边都不变 → 共用部分（SPI/DC/RST/供电）有问题。
-    // 探测判定为 false 时仍强行下发：本板三色屏 PON 后 BUSY 不一定翻转，
-    // 探测可能把好屏判成"未连接"，那会把真正的硬件结论掩盖掉。
-    void RunDualBwrSelfTest() {
-        ESP_LOGW(kTag,
-                 "===== 双三色屏自检 ===== A座 CS=GPIO%d BUSY=GPIO%d | B座 CS=GPIO%d BUSY=GPIO%d",
-                 EPD_CS_PIN, EPD_BUSY_PIN, EPD_COLOR_CS_PIN, EPD_COLOR_BUSY_PIN);
-
-        auto* panel_a = new Uc1679Display(nullptr, EPD_CS_PIN, EPD_BUSY_PIN);
-        auto* panel_b =
-            new Uc1679Display(nullptr, EPD_COLOR_CS_PIN, EPD_COLOR_BUSY_PIN);
-
-        const bool probe_a = panel_a->Init();
-        const bool probe_b = panel_b->Init();
-        ESP_LOGW(kTag, "探测结果：A座=%s B座=%s（false 不代表屏坏，仍强行下发）",
-                 probe_a ? "有响应" : "无响应", probe_b ? "有响应" : "无响应");
-        panel_a->ForceAvailable();
-        panel_b->ForceAvailable();
-
-        const size_t bytes = Uc1679Display::kPlaneBytes;
-        auto* bw = static_cast<uint8_t*>(
-            heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-        auto* red = static_cast<uint8_t*>(
-            heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-        if (!bw || !red) {
-            ESP_LOGE(kTag, "自检缓冲分配失败");
-            return;
-        }
-
-        struct Step {
-            const char* name;
-            uint8_t bw;
-            uint8_t red;
-        };
-        const Step steps[] = {
-            {"全红", 0xFF, 0xFF},
-            {"全黑", 0x00, 0x00},
-            {"全白", 0xFF, 0x00},
-        };
-        for (int round = 0; round < 2; ++round) {
-            for (const auto& step : steps) {
-                std::memset(bw, step.bw, bytes);
-                std::memset(red, step.red, bytes);
-                ESP_LOGW(kTag, "→ 第 %d 轮「%s」：先刷 A 座", round + 1,
-                         step.name);
-                const bool oka = panel_a->ShowFrame(bw, red);
-                vTaskDelay(pdMS_TO_TICKS(1500));
-                ESP_LOGW(kTag, "→ 第 %d 轮「%s」：再刷 B 座", round + 1,
-                         step.name);
-                const bool okb = panel_b->ShowFrame(bw, red);
-                ESP_LOGW(kTag, "   结果 A座=%s B座=%s", oka ? "已下发" : "下发失败",
-                         okb ? "已下发" : "下发失败");
-                vTaskDelay(pdMS_TO_TICKS(6000));
-            }
-        }
-        ESP_LOGW(kTag, "===== 自检结束：停在诊断状态，不进入业务流程 =====");
-    }
-#endif
-
     Ssd2683zaS3Board() {
         InitializePowerAmplifier();
         InitializeI2c();
@@ -1928,24 +1863,6 @@ public:
         display_->SetBwrBackend(bwr_panel_a_);
         ESP_LOGW(kTag, "A 座按三色屏驱动（SSD1619 命令已停用）：CS=GPIO%d BUSY=GPIO%d",
                  EPD_CS_PIN, EPD_BUSY_PIN);
-#endif
-#if EPD_DUAL_BWR_TEST
-        // 两块座子都插三色屏时的硬件自检：跑完停在诊断状态，不进入联网业务流程。
-        RunDualBwrSelfTest();
-        while (true) {
-            vTaskDelay(pdMS_TO_TICKS(2000));
-            ESP_LOGW(kTag, "诊断模式：双三色自检已完成，等待重新烧录固件");
-        }
-#endif
-#if EPD_A42_PROBE_TEST
-        // A 屏（FPC1，4.2" 黑白快刷 SSD1619）纯定时自证：三张图 + BUSY 轨迹。
-        // 不依赖 BUSY 判据，避免"面板能刷但驱动先判失败"把现象掩盖掉。
-        display_->RunPanelProbe();
-#endif
-#if EPD_A42_COLOR_TEST
-        // 纯色循环：全黑/全白各两次。玻璃会明显翻转 → 面板有驱动电压；
-        // 全程纹丝不动 → 命令、SPI、BUSY 都正常也没用，是面板/升压硬件。
-        display_->RunColorCycleTest();
 #endif
         display_->dashboard().SetBookImageLoader(
             [this](const std::string& name) { return LoadBookImage(name); });
@@ -2025,12 +1942,6 @@ public:
         // 正确做法：先显示欢迎页；已绑定且后台配了双屏内容的设备，
         // RefreshDualScreens 成功后会用 RawFrameRefresh 把 A 屏覆盖成网络图
         // （大盘全景等）；未配置/未配网的设备就停在欢迎页引导去后台配置。
-        // 诊断期开关（config.h EPD_BOOT_SELFTEST）：开机先刷三张纯色图，
-        // 用肉眼判定面板到底会不会出墨，再决定下一步查软件还是查硬件。
-        // 注：本版本（4.2 寸双屏）的 Ssd1619Display 还没有 RunPatternSelfTest()
-        // 这个方法（它是后来 5.83 那批改动里加的），原来这里调用了它导致整套
-        // 固件编译不过。EPD_BOOT_SELFTEST 本来就是 0，这里直接去掉该调用，
-        // 需要纯色自检时再把方法补回来即可。
         display_->ShowBootHome();
         ESP_LOGI(kTag, "A 屏首屏显示欢迎页（已配置双屏内容时将被网络图覆盖）");
         display_->dashboard().SetInkSightShow(

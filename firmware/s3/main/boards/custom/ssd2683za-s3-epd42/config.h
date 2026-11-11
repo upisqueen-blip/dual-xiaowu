@@ -79,12 +79,12 @@
 #define EPD_DC_PIN    GPIO_NUM_10
 #define EPD_RST_PIN   GPIO_NUM_11
 
-// ---- FPC1：黑白快刷屏 SSD1619（GetDisplay() 主屏，对话 + 学习信息）----
-// 【临时交叉验证配置】现场已把 A/B 两块屏的排线对调，因此这里把两组引脚
-// 也对调，让 SSD1619 驱动去驱动「现在插在 FPC2 座上」的黑白屏：
-//   A 屏（SSD1619）→ FPC2 座 → CS1/BUSY1 = GPIO9 / GPIO12
-//   B 屏（三色）  → FPC1 座 → CS2/BUSY2 = GPIO39 / GPIO40
-// 验证完成后必须改回：A=FPC1=GPIO39/40，B=FPC2=GPIO9/12（见文件末尾说明）。
+// ---- A 屏：主信息屏（对话 + 学习），业务上走「A 屏」这一路 ----
+// 现场两块座子都已换装同型号三色屏（UC1679 400x300 BWR），因此 A/B 只按
+// 座子区分，不再有黑白快刷屏。引脚按下表固定，不要再改：
+//   A 屏 → CS1/BUSY1 = GPIO9 / GPIO12
+//   B 屏 → CS2/BUSY2 = GPIO39 / GPIO40
+// 共用 DIN=GPIO6 CLK=GPIO8 DC=GPIO10 RST=GPIO11。
 #define EPD_CS_PIN    GPIO_NUM_9
 #define EPD_BUSY_PIN  GPIO_NUM_12
 
@@ -93,46 +93,12 @@
 #define EPD_COLOR_CS_PIN   GPIO_NUM_39
 #define EPD_COLOR_BUSY_PIN GPIO_NUM_40
 
-// Connector aliases used by the SSD1619 probe/recovery logic.
+// 两座的 CS/BUSY 别名：*_FPC1 = A 座，*_FPC2 = B 座。
+// SPI 初始化时要把两条 CS 都拉高、两个 BUSY 都配成输入，故这四个别名保留。
 #define EPD_CS_PIN_FPC1    EPD_CS_PIN
 #define EPD_BUSY_PIN_FPC1  EPD_BUSY_PIN
 #define EPD_CS_PIN_FPC2    EPD_COLOR_CS_PIN
 #define EPD_BUSY_PIN_FPC2  EPD_COLOR_BUSY_PIN
-
-// 开机墨水屏自检：1 = 开机先连刷「全黑 / 全白 / 横条纹」三张纯色图（约 12 秒）
-// 再进入正常首页。用于现场区分「面板不驱动」和「软件没取到图」：
-// 三张图肉眼有变化 → 驱动链路正常；完全没有变化 → 面板没有驱动电压。
-// 出厂量产固件必须改回 0。
-#ifndef EPD_BOOT_SELFTEST
-#define EPD_BOOT_SELFTEST 0  // 面板链路已验证，关闭开机自检（省约 30 秒启动时间）
-#endif
-
-// A 屏（FPC1 / 4.2" 黑白快刷 SSD1619）纯定时自证：1 = 开机先做一次
-// 「不看 BUSY」的三张图测试（全黑 / 全白 / 上黑下白，每张 10 秒），并把
-// BUSY 电平逐 500 ms 打出来。用来一次性分开三件事：
-//   ① BUSY 线是浮空还是被面板驱动
-//   ② 复位后 BUSY 有没有动
-//   ③ 玻璃上到底出不出墨
-// 出厂必须改回 0。诊断完就关：探针每张图占 10 秒，开机白白多等 30 秒，
-// 而且它会把 panel_frame_ 写脏（旧画面取反），影响紧随其后的首帧刷新。
-// 需要再测时用 build 参数 -DEPD_A42_PROBE_TEST=1 打开即可，不必改这个文件。
-#ifndef EPD_A42_PROBE_TEST
-#define EPD_A42_PROBE_TEST 0
-#endif
-
-// 纯色循环自检：全黑 / 全白各两次，每张停留 6 秒，走完整全刷波形 0xF7。
-// 唯一目的是让肉眼回答「玻璃还会不会翻转」，用于区分软件与硬件。
-// 正常情况下必须为 0；出厂固件绝不能打开。
-#ifndef EPD_A42_COLOR_TEST
-#define EPD_A42_COLOR_TEST 0
-#endif
-
-// 双三色屏硬件自检：两块座子插同型号三色屏时，用同一份驱动分别刷 A 座与 B 座。
-// 判据只有一条——同一张图下发后，哪块玻璃变了、哪块没变。
-// 打开后设备停在自检循环里，不进正常业务流程；诊断完必须改回 0。
-#ifndef EPD_DUAL_BWR_TEST
-#define EPD_DUAL_BWR_TEST 0
-#endif
 
 // A 座（FPC2，CS=GPIO9 / BUSY=GPIO12）当前插的是三色屏，不是 SSD1619 黑白屏。
 // 1 = A 屏的上屏动作全部转交三色驱动（Uc1679Display），SSD1619 的初始化与
