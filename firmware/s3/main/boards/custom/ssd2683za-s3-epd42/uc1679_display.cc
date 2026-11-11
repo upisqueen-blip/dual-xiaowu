@@ -103,6 +103,9 @@ void Uc1679Display::HardwareReset() {
     vTaskDelay(pdMS_TO_TICKS(200));   // 加长复位脉冲，确保面板彻底复位
     gpio_set_level(EPD_RST_PIN, 1);
     vTaskDelay(pdMS_TO_TICKS(200));   // 复位后充分建立
+    // 这根 RST 是共享的：FPC1(SSD1619) 此刻已一起被复位，它记录的初始化序号
+    // 因此过期，下次刷新会自己重新下发初始化序列。
+    NoteSharedReset();
 }
 
 int Uc1679Display::DetectIdleLevel() {

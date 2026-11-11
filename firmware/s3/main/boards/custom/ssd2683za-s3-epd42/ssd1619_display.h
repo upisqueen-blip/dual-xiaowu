@@ -67,6 +67,9 @@ private:
     bool refresh_partial_pending_ = false;
     bool refresh_force_pending_ = false;
     bool panel_initialized_ = false;
+    // 本屏完成初始化时共享 RST 的序号。刷新前若序号变了，说明 FPC2 拉过这根
+    // 共用 RST，本屏的升压/LUT 已被清空，必须重新初始化才能出墨。
+    unsigned rst_epoch_seen_ = 0;
     bool panel_faulted_ = false;
     // 故障锁存的时刻，用于 kPanelFaultRetryMs 后自动复位重试（见 Refresh）。
     int64_t panel_faulted_at_ms_ = 0;

@@ -79,6 +79,8 @@ void Ssd2683zaColorPanel::HardwareReset() {
     vTaskDelay(pdMS_TO_TICKS(10));
     gpio_set_level(EPD_RST_PIN, 1);
     vTaskDelay(pdMS_TO_TICKS(10));
+    // RST 与 FPC1(SSD1619) 共用：这次脉冲也把 A 屏复位了，通知它下次刷新前重初始化。
+    NoteSharedReset();
 }
 
 bool Ssd2683zaColorPanel::WaitBusy(uint32_t timeout_ms) {

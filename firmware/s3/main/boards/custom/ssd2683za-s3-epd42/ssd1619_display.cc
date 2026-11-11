@@ -414,6 +414,9 @@ void Ssd1619Display::HardwareReset() {
     }
     gpio_set_level(EPD_RST_PIN, 1);
     vTaskDelay(pdMS_TO_TICKS(20));
+    // RST 与 FPC2 共用：本次脉冲同样把对方复位了，两边序号一起前进。
+    // 自己复位后紧接着会重新初始化，所以这不算「被别人复位」。
+    NoteSharedReset();
 }
 
 bool Ssd1619Display::WaitBusy(uint32_t timeout_ms) {
@@ -752,53 +755,17 @@ void Ssd1619Display::InitializePanel() {
     // 0xC0 = enable clock + analogue. BUSY must return to the sampled idle
     // level before RAM traffic begins.
     const uint8_t power_on = 0xc0;
-    const TickType_t pon_start = xTaskGetTickCount();
     Command(0x22, &power_on, 1);
     Command(0x20);
-    // 上电升压需要时间建立。仅在 20 ms 后读到空闲，可能是 BUSY 尚未拉起，
-    // 不能立即开始写 RAM；保守等 150 ms 再等 BUSY 回到空闲（这段曾被删掉，
-    // 结果"升压到底有没有建立"完全不可见）。
-    bool pon_busy_seen = false;
-    const TickType_t pon_settle_start = xTaskGetTickCount();
-    while ((xTaskGetTickCount() - pon_settle_start) * portTICK_PERIOD_MS < 150) {
-        if (gpio_get_level(busy_pin_) != busy_idle_level_) pon_busy_seen = true;
-        TickType_t poll_ticks = pdMS_TO_TICKS(5);
-        if (poll_ticks == 0) poll_ticks = 1;
-        vTaskDelay(poll_ticks);
-    }
-    // 这一行是「面板到底有没有升压」的唯一硬证据，别删。
-    // 0x22=0xC0 打开时钟 + 模拟电源后，控制器的升压（VGH/VGL/VSH/VSL）需要
-    // 一两百毫秒才能建立，期间 BUSY 一定是忙的。忙了 → 电源起来了；几乎是
-    // 0 ms → 这条命令根本没触发升压，后面波形跑得再久也只是空转，玻璃不会
-    // 出墨。判「屏坏了」之前先看这个数字。
-    const bool pon_ok = WaitBusy(10000);
-    const uint32_t pon_ms =
-        static_cast<uint32_t>((xTaskGetTickCount() - pon_start) * portTICK_PERIOD_MS);
-    if (!pon_ok) {
-        // 只告警、不锁存、不 return。BUSY 极性判反或该脚浮空同样会让这里
-        // 超时，但那不代表屏坏；10 月版本在此处忽略返回值继续初始化，屏是
-        // 能出图的。改成 MarkPanelFaulted() 会把一次超时放大成「静默 30 s
-        // 且本轮彻底不刷新」，正是 A 屏毫无反应的另一半原因。
-        ESP_LOGE(kTag,
-                 "模拟电源启动后 BUSY 未回到空闲电平 %d，仍继续触发刷新",
-                 busy_idle_level_);
-    }
-    if (!busy_driven_) {
-        ESP_LOGW(kTag,
-                 "BUSY 不可观测：0x22/0x20 后仅完成固定等待 %lu ms，"
-                 "无法据此确认模拟升压或面板响应",
-                 static_cast<unsigned long>(pon_ms));
-    } else if (!pon_busy_seen) {
-        ESP_LOGW(kTag,
-                 "升压后等待 %lu ms，但未观察到 BUSY 忙态；"
-                 "模拟电源是否建立仍未确认",
-                 static_cast<unsigned long>(pon_ms));
-    } else {
-        ESP_LOGI(kTag,
-                 "升压 BUSY 波形已观察并回到空闲：0x22=0xC0 + 0x20，耗时 %lu ms",
-                 static_cast<unsigned long>(pon_ms));
-    }
+    // 严格保持 2026-11-04 (eafe223) 的写法：固定等 20 ms，再等 BUSY 回空闲。
+    // 不要在这里加「超时即 MarkPanelFaulted / return」—— BUSY 极性判反或该脚
+    // 浮空都会让等待超时，但那不代表屏坏，锁存只会把一次超时放大成静默不刷。
+    vTaskDelay(pdMS_TO_TICKS(20));
+    // 同上，避免默认 10 秒超时把初始化卡死。
+    WaitBusy(2000);
     panel_initialized_ = true;
+    // 记下初始化完成时的共享 RST 序号，供 RefreshOnce 判断自己是否被别人复位过。
+    rst_epoch_seen_ = SharedResetEpoch();
     ESP_LOGI(kTag, "SSD1619 analogue power/init sequence complete");
 }
 
@@ -891,6 +858,19 @@ void Ssd1619Display::Refresh(const uint8_t* data, bool partial) {
 }
 
 bool Ssd1619Display::RefreshOnce(const uint8_t* data, bool partial) {
+    // RST(GPIO11) 与 FPC2 共用：FPC2 每次初始化/刷新都会把本屏一起复位，
+    // 0x22/0x0C/0x01 写进去的升压与 LUT 配置随之清空。此时若仍然认为
+    // panel_initialized_ == true 就直接发 0x24/0x26/0x20，波形只会空转：
+    // BUSY 照翻、日志照打 "Full refresh complete"，玻璃一个墨点都不动。
+    // 这正是「A 屏只有上电首帧可见、之后永远停在旧图」的真正原因。
+    if (panel_initialized_ && SharedResetEpoch() != rst_epoch_seen_) {
+        ESP_LOGW(kTag,
+                 "共享 RST 被 FPC2 改动（epoch %u→%u），重新初始化 A 屏后再刷",
+                 rst_epoch_seen_, SharedResetEpoch());
+        panel_initialized_ = false;
+        base_frame_valid_ = false;
+        partial_refresh_count_ = 0;
+    }
     if (!panel_initialized_) InitializePanel();
     if (panel_faulted_) return false;
 
@@ -914,6 +894,8 @@ bool Ssd1619Display::RefreshOnce(const uint8_t* data, bool partial) {
 
         HardwareReset();
         vTaskDelay(pdMS_TO_TICKS(10));
+        // 本次是自己拉的复位，紧接着会重发 partial LUT，不算「被 FPC2 复位」。
+        rst_epoch_seen_ = SharedResetEpoch();
         // 显式 2 秒：默认 10 秒在极性判反时会把整次刷新死死卡住，用户看到
         // 的就是"按了没反应"。复位后回空闲远不需要 10 秒。
         if (!WaitBusy(2000)) return false;
@@ -975,14 +957,22 @@ bool Ssd1619Display::RefreshOnce(const uint8_t* data, bool partial) {
     SetRamWindow();
     Command(0x24);
     Data(data, kFrameBytes);
-    // 0x26 是控制器的「旧画面」平面。这里必须写与 0x24 完全相同的帧——
-    // 这是 10 月版本在真机上稳定出图的写法（SSD1619 全刷 0xF7 对全部栅线
-    // 施加完整 OTP 波形，不按 0x26 做差分）。
-    // 曾经把它改成「新画面的反相」，理由是「让每个像素都判为变化」；结果
-    // 真机上 A 屏（FPC1）从此完全不更新，B 屏照常闪——即本次故障的根因。
+    // 0x26 是控制器的「旧画面」参考平面。SSD1619 快刷屏的 OTP 全刷波形是差分
+    // 的：它逐像素比较 0x24(新) 与 0x26(旧)，只有两者不同的像素才会被真正
+    // 驱动（相同则给 VSS，一伏都不加）。
+    // 若把同一份 data 先写 0x24 再写 0x26，等于告诉控制器「整屏没有任何
+    // 变化」：波形照跑、BUSY 照翻转、日志照打 "Full refresh complete"，玻璃上
+    // 却一个墨点都不动。也只有上电后的第一帧能看见（那时 0x26 还是上电残留
+    // 值），之后 0x26 被写成和 0x24 一样，屏就永久冻在那一帧。
+    // 因此把旧平面填成新画面的反相：每个像素都判为变化，按目标极性全量驱动。
+    // 这是 2026-11-04 (eafe223) 在真机上验证 A 屏正常出图的写法，不要改回
+    // 同一份 data —— 那样 A 屏会只剩首帧可见。
+    for (size_t i = 0; i < kFrameBytes; ++i) {
+        panel_frame_[i] = static_cast<uint8_t>(~data[i]);
+    }
     SetRamWindow();
     Command(0x26);
-    Data(data, kFrameBytes);
+    Data(panel_frame_, kFrameBytes);
     const uint8_t update = 0xf7;
     // 同上：触发前先把 BUSY 排到空闲，避免 0x20 被忽略。
     WaitBusy(2000);
