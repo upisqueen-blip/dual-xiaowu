@@ -75,6 +75,10 @@ echo   Content      : http://dualcn.localhost/
 echo   Route table  : http://localhost/
 echo ============================================================
 echo.
+echo   Flasher page stays in port mode:
+echo     start_web_flash.bat  -^>  http://localhost:8091/zh/flash
+echo.
+echo.
 echo   Close the "dev-proxy :80" window to stop domain mode.
 echo   Tasks are minimized on the taskbar.
 echo.
