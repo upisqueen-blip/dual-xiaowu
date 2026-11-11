@@ -29,7 +29,7 @@ from core.config_store import (
     unbind_device,
 )
 from core.db import get_main_db
-from core.email import send_verification_code, verify_code
+from core.email import send_verification_code, smtp_configured, verify_code
 
 router = APIRouter(tags=["user"])
 
@@ -471,7 +471,9 @@ async def bind_email_send_code(body: dict, user_id: int = Depends(require_user))
     ok, message = await send_verification_code(email)
     if not ok:
         return JSONResponse({"error": message}, status_code=429)
-    return {"ok": True, "message": message}
+    # 没配 SMTP 时后端只会把验证码打进日志，HTTP 却是 200 —— 前端看起来像
+    # 「已发送」，用户等邮件等不到。这里把 dev 模式显式带出去，由前端提示。
+    return {"ok": True, "message": message, "dev_mode": not smtp_configured()}
 
 
 @router.post("/user/bind-email")

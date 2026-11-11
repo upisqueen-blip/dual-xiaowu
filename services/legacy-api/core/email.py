@@ -28,8 +28,18 @@ def _generate_code() -> str:
     return "".join(random.choices(string.digits, k=_CODE_LENGTH))
 
 
-def _smtp_configured() -> bool:
+def smtp_configured() -> bool:
+    """True 表示 SMTP_HOST / SMTP_USER 都填了，真的会去连邮件服务器。
+
+    没有配置时 `send_verification_code` 只把验证码打进日志并返回成功，
+    调用方（登录页找回密码、绑定邮箱）因此看起来像「已发送」。
+    接口层用这个函数把 dev 模式显式告诉前端，别再静默成功。
+    """
     return bool(os.environ.get("SMTP_HOST") and os.environ.get("SMTP_USER"))
+
+
+def _smtp_configured() -> bool:  # 向后兼容旧调用
+    return smtp_configured()
 
 
 @lru_cache(maxsize=1)
@@ -79,8 +89,13 @@ async def send_verification_code(email: str) -> tuple[bool, str]:
     code = _generate_code()
     _pending_codes[email] = (code, time.time())
 
-    if not _smtp_configured():
-        logger.warning("[EMAIL] SMTP not configured — code for %s is %s (dev mode)", email, code)
+    if not smtp_configured():
+        logger.warning(
+            "[EMAIL][DEV] SMTP not configured (SMTP_HOST/SMTP_USER empty) — "
+            "code for %s is %s, printed to log only, NO mail was sent",
+            email,
+            code,
+        )
         return True, "验证码已发送（开发模式：检查服务器日志）"
 
     subject = "XiaoWuAI 验证码"
