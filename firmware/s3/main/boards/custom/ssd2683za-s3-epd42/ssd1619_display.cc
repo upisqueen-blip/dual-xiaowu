@@ -371,6 +371,42 @@ void Ssd1619Display::InitializeSpi() {
     device.spics_io_num = -1;
     device.queue_size = 2;
     ESP_ERROR_CHECK(spi_bus_add_device(EPD_SPI_NUM, &device, &spi_));
+
+    // 引脚回读自检（诊断已通过，保留关闭状态）。GPIO39 是 ESP32-S3 的 JTAG
+    // MTCK，必须确认能正常输出；实机验证拉低读 0 / 拉高读 1，CS 通路正常。
+    // 需要复测时把下面的 0 改成 1。
+#if 0
+    {
+        gpio_config_t io = {};
+        io.pin_bit_mask = 1ULL << cs_pin_;
+        io.mode = GPIO_MODE_INPUT_OUTPUT;
+        io.pull_up_en = GPIO_PULLUP_DISABLE;
+        io.pull_down_en = GPIO_PULLDOWN_DISABLE;
+        io.intr_type = GPIO_INTR_DISABLE;
+        gpio_config(&io);
+
+        gpio_set_level(cs_pin_, 0);
+        esp_rom_delay_us(200);
+        const int cs_low = gpio_get_level(cs_pin_);
+        gpio_set_level(cs_pin_, 1);
+        esp_rom_delay_us(200);
+        const int cs_high = gpio_get_level(cs_pin_);
+        gpio_set_level(cs_pin_, 1);
+
+        io.mode = GPIO_MODE_OUTPUT;
+        gpio_config(&io);
+
+        if (cs_low != 0 || cs_high != 1) {
+            ESP_LOGE(kTag,
+                     "CS 自检失败 GPIO%d：拉低读=%d 拉高读=%d ← 该脚无法正常"
+                     "输出，SPI 命令到不了面板（检查是否被 JTAG/外设占用）",
+                     cs_pin_, cs_low, cs_high);
+        } else {
+            ESP_LOGI(kTag, "CS 自检正常 GPIO%d（拉低读 0 / 拉高读 1）",
+                     cs_pin_);
+        }
+    }
+#endif
     ESP_LOGI(kTag,
              "SSD1619 ready: %dx%d, frame=%u bytes, %s 座 "
              "(DIN=GPIO%d CLK=GPIO%d CS=GPIO%d DC=GPIO%d RST=GPIO%d "
@@ -957,22 +993,12 @@ bool Ssd1619Display::RefreshOnce(const uint8_t* data, bool partial) {
     SetRamWindow();
     Command(0x24);
     Data(data, kFrameBytes);
-    // 0x26 是控制器的「旧画面」参考平面。SSD1619 快刷屏的 OTP 全刷波形是差分
-    // 的：它逐像素比较 0x24(新) 与 0x26(旧)，只有两者不同的像素才会被真正
-    // 驱动（相同则给 VSS，一伏都不加）。
-    // 若把同一份 data 先写 0x24 再写 0x26，等于告诉控制器「整屏没有任何
-    // 变化」：波形照跑、BUSY 照翻转、日志照打 "Full refresh complete"，玻璃上
-    // 却一个墨点都不动。也只有上电后的第一帧能看见（那时 0x26 还是上电残留
-    // 值），之后 0x26 被写成和 0x24 一样，屏就永久冻在那一帧。
-    // 因此把旧平面填成新画面的反相：每个像素都判为变化，按目标极性全量驱动。
-    // 这是 2026-11-04 (eafe223) 在真机上验证 A 屏正常出图的写法，不要改回
-    // 同一份 data —— 那样 A 屏会只剩首帧可见。
-    for (size_t i = 0; i < kFrameBytes; ++i) {
-        panel_frame_[i] = static_cast<uint8_t>(~data[i]);
-    }
+    // The 4.2-inch SSD1619 reference sequence writes both RAM planes for a
+    // monochrome full refresh. 严格对齐 2026-10-21 (b010d19) 已验证可出图的
+    // 写法：0x24 与 0x26 写同一份帧。不要改成反相——那不是硬件需要的。
     SetRamWindow();
     Command(0x26);
-    Data(panel_frame_, kFrameBytes);
+    Data(data, kFrameBytes);
     const uint8_t update = 0xf7;
     // 同上：触发前先把 BUSY 排到空闲，避免 0x20 被忽略。
     WaitBusy(2000);
