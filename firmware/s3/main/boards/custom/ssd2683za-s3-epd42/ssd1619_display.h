@@ -54,6 +54,11 @@ public:
     // 上的控制器已经换成 SSD1683 一类，SSD1619 的初始化/波形命令会把它配乱。
     void SetBwrBackend(Uc1679Display* backend) { bwr_backend_ = backend; }
 
+    // A 座换成四色屏（SSD2683ZA）时用：波形下发改由 board 持有的彩色面板驱动
+    // 完成（两块屏的 packed 帧格式不同，不塞进本类）。设置后 Refresh() 直接返回，
+    // 不再向那个座发任何 SSD1619 命令——控制器已经不是 SSD1619 了。
+    void SetExternalColorPanel(bool external) { external_color_panel_ = external; }
+
     bool IsPanelBusy() const {
         if (busy_idle_level_ < 0 || panel_faulted_) return false;
         return gpio_get_level(busy_pin_) != busy_idle_level_;
@@ -115,6 +120,8 @@ private:
     uint8_t* bwr_last_frame_ = nullptr;  // 上一帧副本，用于内容去重
     bool bwr_frame_valid_ = false;
     void RefreshViaBwr(const uint8_t* data);
+    // A 座是四色屏：波形下发由 board 的彩色面板驱动完成，本类不再碰那个座。
+    bool external_color_panel_ = false;
 
     static void FlushCallback(lv_display_t* display, const lv_area_t* area,
                               uint8_t* pixels);

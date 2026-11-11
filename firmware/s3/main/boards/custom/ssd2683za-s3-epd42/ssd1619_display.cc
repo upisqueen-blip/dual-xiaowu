@@ -700,6 +700,9 @@ void Ssd1619Display::RefreshViaBwr(const uint8_t* data) {
 }
 
 void Ssd1619Display::Refresh(const uint8_t* data, bool partial) {
+    // A 座是四色屏时，这块座上的控制器已不是 SSD1619，本类一个命令都不能发；
+    // 双屏内容由 board 直接调彩色面板驱动刷。
+    if (external_color_panel_) return;
     // 三色后端优先：A 座上的控制器已经不是 SSD1619 了，下面所有
     // InitializePanel / 0x24 / 0x26 / 0x22=0xF7 都不能发出去，
     // 必须在这把 EpaperBusGuard 之前转走（ShowFrame 内部自己加锁）。

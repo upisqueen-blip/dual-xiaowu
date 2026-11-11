@@ -41,6 +41,7 @@
 #include <atomic>
 #include <cctype>
 #include <cstdio>
+#include <cstring>
 #include <utility>
 
 namespace {
@@ -49,7 +50,8 @@ constexpr const char* kTag = "Ssd2683zaS3Board";
 #if EPD_ENABLE_COLOR_SCREEN
 // 仅 4-color(SSD2683ZA BWRY) 需要把 BW/RED 平面打包成 2bpp；3-color(SSD1683 BWR)
 // 直接喂两平面（见 ShowColorFrame），故本函数只在 4-color 编译。
-#if FPC2_COLOR_COUNT == 4
+// A 座也可能换成四色屏（EPD_A_PANEL_COLORS == 4），两块座共用这段打包逻辑。
+#if FPC2_COLOR_COUNT == 4 || EPD_A_PANEL_COLORS == 4
 // Match the existing SSD2683ZA reference driver: RAM codes are black=0,
 // white=1, yellow=2, red=3. Load2bpp returns B/W and red-marker planes,
 // preserving yellow vs red by whether the underlying B/W pixel is white.
@@ -74,7 +76,7 @@ void PackInkSightFourColor(const uint8_t* bw_plane, const uint8_t* red_plane,
             (panel_color << shift));
     }
 }
-#endif  // FPC2_COLOR_COUNT == 4
+#endif  // FPC2_COLOR_COUNT == 4 || EPD_A_PANEL_COLORS == 4
 #endif
 }
 
@@ -82,10 +84,22 @@ class Ssd2683zaS3Board : public WifiBoard {
 private:
     i2c_master_bus_handle_t i2c_bus_ = nullptr;
     Ssd1619Display* display_ = nullptr;
-#if EPD_A_SCREEN_IS_BWR
-    // A 座换装三色屏后的上屏后端：display_ 仍是 Display 接口与帧缓冲的持有者，
-    // 真正的波形下发交给它（见 Ssd1619Display::SetBwrBackend）。
-    Uc1679Display* bwr_panel_a_ = nullptr;
+#if EPD_A_PANEL_COLORS >= 3
+    // A 座换装彩色屏后的上屏驱动（见 config.h EPD_A_PANEL_COLORS）：
+    //   3 色 → Uc1679Display（BW/RED 两平面）
+    //   4 色 → Ssd2683zaColorPanel（2bpp packed）
+    // display_ 仍是 Display 接口与 LVGL 帧缓冲的持有者，双屏内容由这里的实例直接送显。
+#if EPD_A_PANEL_COLORS == 3
+    Uc1679Display* color_panel_a_ = nullptr;
+#else
+    Ssd2683zaColorPanel* color_panel_a_ = nullptr;
+#endif
+    uint8_t* a_bw_ = nullptr;       // A 座白平面（1=白）
+    uint8_t* a_red_ = nullptr;      // A 座红标记平面（1=红）
+    uint8_t* a_packed_ = nullptr;   // 四色打包帧（仅 4 色用）
+    uint8_t* a_last_bw_ = nullptr;  // 上一帧副本，用于内容去重（全刷 20~30 s）
+    uint8_t* a_last_red_ = nullptr;
+    bool a_frame_valid_ = false;
 #endif
     SdCardStorage storage_;
     // VBAT 分压采样（GPIO7 = ADC1_CH6，见 config.h）。双屏 A 屏右上角
@@ -369,6 +383,23 @@ private:
     }
 #endif
 
+#if EPD_A_PANEL_COLORS >= 3
+    // 把 BW/RED 两平面送显到 A 座（FPC1）。三色直接喂两平面，四色先打包 2bpp。
+    // 两块座尺寸一致，packed/frame 缓冲都按 FPC2_* 分配。
+    bool ShowColorFrameA(const uint8_t* bw, const uint8_t* red) {
+        if (color_panel_a_ == nullptr || bw == nullptr || red == nullptr) {
+            return false;
+        }
+#if EPD_A_PANEL_COLORS == 3
+        return color_panel_a_->ShowFrame(bw, red);
+#else
+        if (a_packed_ == nullptr) return false;
+        PackInkSightFourColor(bw, red, a_packed_);
+        return color_panel_a_->ShowFrame(a_packed_);
+#endif
+    }
+#endif
+
     // InkSight 今日看板：帧缓冲放在 PSRAM，15KB；busy_ 防重复刷新。
     uint8_t* inksight_frame_ = nullptr;
     std::atomic<bool> inksight_busy_{false};
@@ -622,7 +653,10 @@ private:
         bool device_unbound = inksight_device_unbound_.load();
         bool any_ok = false;
 
-        // A 屏：便签（1bpp BMP → SSD1619）
+        // A 屏：便签。面板类型决定帧格式（见 config.h EPD_A_PANEL_COLORS）：
+        //   2 = 1bpp BMP → SSD1619 快刷
+        //   3/4 = 2bpp 裸帧 → 拆成 BW/RED 两平面 → 三色直送 / 四色打包
+#if EPD_A_PANEL_COLORS == 2
         if (inksight_frame_ == nullptr) {
             inksight_frame_ = static_cast<uint8_t*>(heap_caps_malloc(
                 InkSightClient::kFrameBytes,
@@ -646,6 +680,67 @@ private:
                 ESP_LOGW(kTag, "双屏 A 拉取失败: %s", error.c_str());
             }
         }
+#else
+        {
+            static constexpr size_t kPlaneBytes =
+                InkSightClient::kColorStride * InkSightClient::kColorHeight;
+            if (a_bw_ == nullptr) {
+                a_bw_ = static_cast<uint8_t*>(heap_caps_malloc(
+                    kPlaneBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+                a_red_ = static_cast<uint8_t*>(heap_caps_malloc(
+                    kPlaneBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+                a_last_bw_ = static_cast<uint8_t*>(heap_caps_malloc(
+                    kPlaneBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+                a_last_red_ = static_cast<uint8_t*>(heap_caps_malloc(
+                    kPlaneBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+            }
+#if EPD_A_PANEL_COLORS == 4
+            if (a_packed_ == nullptr) {
+                a_packed_ = static_cast<uint8_t*>(heap_caps_malloc(
+                    Ssd2683zaColorPanel::kFrameBytes,
+                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+            }
+            const bool a_mem_ok = a_bw_ && a_red_ && a_last_bw_ && a_last_red_ && a_packed_;
+#else
+            const bool a_mem_ok = a_bw_ && a_red_ && a_last_bw_ && a_last_red_;
+#endif
+            if (a_mem_ok) {
+                std::string error;
+                // 电量仍随 DUAL_A 上报（后端画在 A 屏右上角）。
+                // （Load2bpp 目前不带电量参数，改由 Load 的历史路径保证；A 座
+                //   彩色屏不显示电量图标不影响功能，后续需要再加。）
+                if (InkSightClient::Load2bpp(
+                        GetNetwork(), inksight_server_, "DUAL_A",
+                        SystemInfo::GetMacAddress(), a_bw_, a_red_, error,
+                        nullptr /* server_refresh_minutes */, &device_unbound,
+                        EPD_A_PANEL_COLORS, "A")) {
+                    any_ok = true;
+                    // 三色/四色都是 20~30 s 全刷，内容没变就别刷，否则每轮
+                    // 定时刷新都白等半分钟、还会和 LVGL 重绘抢总线。
+                    if (a_frame_valid_ &&
+                        std::memcmp(a_last_bw_, a_bw_, kPlaneBytes) == 0 &&
+                        std::memcmp(a_last_red_, a_red_, kPlaneBytes) == 0) {
+                        ESP_LOGI(kTag, "双屏 A 内容未变，跳过全刷");
+                    } else {
+                        std::memcpy(a_last_bw_, a_bw_, kPlaneBytes);
+                        std::memcpy(a_last_red_, a_red_, kPlaneBytes);
+                        a_frame_valid_ = true;
+                        if (ShowColorFrameA(a_bw_, a_red_)) {
+                            ESP_LOGI(kTag, "双屏 A（便签）已刷新（%d 色）",
+                                     EPD_A_PANEL_COLORS);
+                        } else {
+                            ESP_LOGW(kTag, "双屏 A 刷屏失败");
+                            a_frame_valid_ = false;  // 下次同一画面还能重试
+                        }
+                    }
+                } else {
+                    ESP_LOGW(kTag, "双屏 A 拉取失败: %s", error.c_str());
+                }
+            } else {
+                ESP_LOGW(kTag, "双屏 A 内存不足");
+            }
+        }
+#endif
 
         // B 屏：今日课程表（2bpp → SSD2683ZA BWRY）
         // 上电时 FPC2 偶发探测失败，这里懒探测自愈：只要双屏模式还在，就再试一次
@@ -1854,14 +1949,28 @@ public:
         InitializePowerAmplifier();
         InitializeI2c();
         display_ = new Ssd1619Display();
-#if EPD_A_SCREEN_IS_BWR
-        // A 座上现在是三色屏：建一个指向 A 座的实例，接管全部上屏动作。
+#if EPD_A_PANEL_COLORS == 3
+        // A 座三色屏：建一个指向 A 座的实例，接管全部上屏动作。
         // 不走 Init()——它会先刷一张全白探测帧（约 28 s），开机白等半分钟；
         // ConfigurePanel() 本来每次刷新都会复位并重测 BUSY 极性，够用。
-        bwr_panel_a_ = new Uc1679Display(nullptr, EPD_CS_PIN, EPD_BUSY_PIN);
-        bwr_panel_a_->ForceAvailable();
-        display_->SetBwrBackend(bwr_panel_a_);
+        color_panel_a_ = new Uc1679Display(nullptr, EPD_CS_PIN, EPD_BUSY_PIN);
+        color_panel_a_->ForceAvailable();
+        display_->SetBwrBackend(color_panel_a_);
         ESP_LOGW(kTag, "A 座按三色屏驱动（SSD1619 命令已停用）：CS=GPIO%d BUSY=GPIO%d",
+                 EPD_CS_PIN, EPD_BUSY_PIN);
+#elif EPD_A_PANEL_COLORS == 4
+        // A 座四色屏：SSD2683ZA 与三色屏同座电气兼容，但帧是 2bpp packed，
+        // 由 board 直接调用，Ssd1619Display 不再向该座发任何命令。
+        color_panel_a_ = new Ssd2683zaColorPanel(nullptr, EPD_CS_PIN, EPD_BUSY_PIN);
+        display_->SetExternalColorPanel(true);
+        if (color_panel_a_->Init()) {
+            ESP_LOGW(kTag, "A 座按四色屏驱动（SSD1619 命令已停用）：CS=GPIO%d BUSY=GPIO%d",
+                     EPD_CS_PIN, EPD_BUSY_PIN);
+        } else {
+            ESP_LOGE(kTag, "A 座四色屏初始化失败，双屏 A 内容将无法显示");
+        }
+#else
+        ESP_LOGI(kTag, "A 座按黑白屏（SSD1619）驱动：CS=GPIO%d BUSY=GPIO%d",
                  EPD_CS_PIN, EPD_BUSY_PIN);
 #endif
         display_->dashboard().SetBookImageLoader(

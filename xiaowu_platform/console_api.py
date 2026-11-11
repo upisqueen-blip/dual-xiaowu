@@ -316,7 +316,9 @@ def _factory_system_config(mac: str) -> dict[str, Any]:
         "version": 1,
         "sceneKey": "system",
         "deviceMac": mac,
-        "screen": {"size": "4.2", "colors": 3},
+        # aColors / colors 分别是 A/B 两块屏的面板色数（2 黑白 / 3 三色 / 4 四色），
+        # 后端按各自的值出图，与固件编译期宏解耦。
+        "screen": {"size": "4.2", "colors": 3, "aColors": 3},
         "config": {
             "system": {
                 "a": {

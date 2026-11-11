@@ -297,9 +297,19 @@ def _pct_text(pct: Optional[float]) -> str:
 
 
 # ── A 屏：自选列表 / 市场摘要（1-bit 黑白） ─────────────────────
+def _is_up(q: dict[str, Any]) -> bool:
+    """涨跌判定（腾讯字段是字符串，容错转 float）。A 股习惯：涨=红、跌=黑。"""
+    try:
+        return float(str(q.get("pct") or "0").strip() or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def render_finance_list(quotes: list[dict[str, Any]], w: int, h: int,
-                        title: str = "自选行情", footer: str = "") -> Image.Image:
-    img = Image.new("1", (w, h), 1)
+                        title: str = "自选行情", footer: str = "",
+                        colors: int = 2) -> Image.Image:
+    colored = colors >= 3
+    img = _palette(w, h, colors) if colored else Image.new("1", (w, h), 1)
     draw = ImageDraw.Draw(img)
     s = w / 400.0
     pad = int(12 * s)
@@ -332,7 +342,9 @@ def render_finance_list(quotes: list[dict[str, Any]], w: int, h: int,
         draw.text((int(w * 0.62) - pw, y + row_h // 2 - int(9 * s)), price, fill=0, font=f_price)
         pct = _pct_text(q.get("pct"))
         cw = draw.textlength(pct, font=f_price)
-        draw.text((w - pad - cw, y + row_h // 2 - int(9 * s)), pct, fill=0, font=f_price)
+        # 三色/四色面板：涨用红色（索引 3），跌保持黑色。黑白面板恒黑。
+        draw.text((w - pad - cw, y + row_h // 2 - int(9 * s)), pct,
+                  fill=3 if (colored and _is_up(q)) else 0, font=f_price)
         if i:
             draw.line([(pad, y), (w - pad, y)], fill=0, width=1)
     foot = footer or "行情快照 · 腾讯公开接口（原型）"
@@ -418,18 +430,22 @@ def render_kline_image(kline: dict[str, Any], w: int, h: int, colors: int) -> Im
 
 # ── 渲染入口（由 render_dual_screen 的理财分支调用） ───────────
 def render_a_screen(a_cfg: dict[str, Any], dual_config: Optional[dict], w: int, h: int,
-                    mac: str = "") -> Image.Image:
-    """A 屏理财模式：finance-market 大盘全景 / finance-summary 市场摘要 / finance-watch 自选行情。"""
+                    mac: str = "", colors: int = 2) -> Image.Image:
+    """A 屏理财模式：finance-market 大盘全景 / finance-summary 市场摘要 / finance-watch 自选行情。
+
+    colors 由后台「A 屏面板色彩」决定：2=黑白，3/4 时涨跌带红色强调。
+    """
     mode = str(a_cfg.get("mode") or "finance-watch")
     if mode == "finance-market":
         groups = fetch_market_indices()
-        return render_market_board(groups, w, h)
+        return render_market_board(groups, w, h, colors=colors)
     watchlist = _effective_watchlist(mac, dual_config)
     if mode == "finance-summary":
         quotes = fetch_quotes(INDEX_SUMMARY_CODES)
-        return render_finance_list(quotes, w, h, title="市场摘要", footer="指数快照 · 腾讯公开接口（原型）")
+        return render_finance_list(quotes, w, h, title="市场摘要",
+                                   footer="指数快照 · 腾讯公开接口（原型）", colors=colors)
     quotes = fetch_quotes(watchlist) if watchlist else []
-    return render_finance_list(quotes, w, h, title="自选行情")
+    return render_finance_list(quotes, w, h, title="自选行情", colors=colors)
 
 
 def render_b_screen(b_cfg: dict[str, Any], dual_config: Optional[dict], w: int, h: int, colors: int,
@@ -1020,9 +1036,14 @@ def fetch_sectors() -> dict[str, list[dict]]:
 
 
 # ── A 屏：大盘全景（1-bit 黑白，2 列网格） ───────────────────
-def render_market_board(groups: list, w: int, h: int, title: str = "大盘全景") -> Image.Image:
-    """A 屏（1-bit 黑白）：多市场指数总览。2 列网格，▲/▼ + 数值区分涨跌（A 屏无彩色）。"""
-    img = Image.new("1", (w, h), 1)
+def render_market_board(groups: list, w: int, h: int, title: str = "大盘全景",
+                        colors: int = 2) -> Image.Image:
+    """A 屏多市场指数总览。2 列网格，▲/▼ + 数值区分涨跌。
+
+    黑白面板全黑字；三色/四色面板把上涨项标红（A 股习惯），下跌保持黑色。
+    """
+    colored = colors >= 3
+    img = _palette(w, h, colors) if colored else Image.new("1", (w, h), 1)
     draw = ImageDraw.Draw(img)
     s = w / 400.0
     pad = int(10 * s)
@@ -1061,7 +1082,9 @@ def render_market_board(groups: list, w: int, h: int, title: str = "大盘全景
         nx = max(col_left + int(3 * s), min(col_center - nw / 2, col_left + col_w - int(3 * s) - nw))
         vx = max(col_left + int(3 * s), min(col_center - vw / 2, col_left + col_w - int(3 * s) - vw))
         draw.text((nx, cy - row_h * 0.42), name, fill=0, font=f_name)
-        draw.text((vx, cy + int(2 * s)), val_line, fill=0, font=f_val)
+        # 涨跌整行上色：三色/四色面板涨红、跌黑；黑白面板恒黑。
+        draw.text((vx, cy + int(2 * s)), val_line,
+                  fill=3 if (colored and _is_up(q)) else 0, font=f_val)
     # 列分隔线（仅当双列且行数 > 1）；自页眉线起向下贯通，框出网格
     if rows_n > 1:
         draw.line([(pad + col_w, int(34 * s)), (pad + col_w, bottom)], fill=0, width=1)

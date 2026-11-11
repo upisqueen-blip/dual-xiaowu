@@ -162,39 +162,62 @@ def _palette_p_image(w: int, h: int, colors: int = 4) -> Image.Image:
 _PANEL_COLORS = (2, 3, 4)
 
 
-def screen_colors_from_config(dual_config: Optional[dict]) -> Optional[int]:
-    """读取内容后台「B 屏色彩」选择。
+# 屏幕规格节点：A/B 各自独立。历史配置只有一个 `screen` 节点，其中 colors
+# 的语义固定是 B 屏（FPC2），所以 A 屏必须读自己的键，绝不能回退到 colors，
+# 否则老配置会把黑白 A 屏误判成彩色。
+_SCREEN_NODE_KEYS = {
+    "A": ("screen", "screenA", "screen_a", "screen_a_config"),
+    "B": ("screen", "screenB", "screen_b", "screen_b_config"),
+}
+_SCREEN_COLOR_KEYS = {
+    "A": ("aColors", "colorsA", "a_colors"),
+    "B": ("colors", "bColors", "colorsB", "b_colors"),
+}
 
-    后台下发的 dual-config 把屏幕规格放在顶层 `screen`（另兼容小程序/第三方
-    可能使用的 screenB / screen_b）。只接受 2/3/4，其它值视为未设置。
+
+def _norm_screen(screen: Optional[str]) -> str:
+    return "A" if str(screen or "B").strip().upper() == "A" else "B"
+
+
+def screen_colors_from_config(dual_config: Optional[dict],
+                              screen: str = "B") -> Optional[int]:
+    """读取内容后台「A/B 屏色彩」选择，返回 2/3/4 或 None（未设置）。
+
+    B 屏沿用历史上的 `screen.colors`；A 屏新增 `screen.aColors`。只接受
+    2/3/4，其它值（含 bool）视为未设置，由设备请求或默认值兜底。
     """
     if not isinstance(dual_config, dict):
         return None
-    for key in ("screen", "screenB", "screen_b", "screen_b_config"):
-        node = dual_config.get(key)
+    which = _norm_screen(screen)
+    for node_key in _SCREEN_NODE_KEYS[which]:
+        node = dual_config.get(node_key)
         if not isinstance(node, dict):
             continue
-        value = node.get("colors")
-        if isinstance(value, bool):  # bool 是 int 子类，必须排除
-            continue
-        if isinstance(value, int) and value in _PANEL_COLORS:
-            return value
+        for value_key in _SCREEN_COLOR_KEYS[which]:
+            value = node.get(value_key)
+            if isinstance(value, bool):  # bool 是 int 子类，必须排除
+                continue
+            if isinstance(value, int) and value in _PANEL_COLORS:
+                return value
     return None
 
 
 def resolve_dual_colors(dual_config: Optional[dict],
                         requested: Optional[int] = None,
-                        default: int = 4) -> tuple[int, str]:
-    """决定 B 屏按几色渲染，返回 (色数, 来源)。
+                        default: int = 4,
+                        screen: str = "B") -> tuple[int, str]:
+    """决定某块屏按几色渲染，返回 (色数, 来源)。
 
-    优先级：后台选择 > 设备请求 > 默认四色。
+    优先级：后台选择 > 设备请求 > 默认值（A 屏 2 色，B 屏 4 色）。
 
-    后台选择必须压过固件编译期值 `FPC2_COLOR_COUNT`：同一个后台要同时服务
-    三色板和四色板，运营在「屏幕规格」里选了三色就该出三色版式（红为唯一
-    强调色、无黄色像素），选了四色才用黄色做强调。反过来若让固件请求当上限，
-    三色板固件会让后台选的四色永远是死设置。
+    后台选择必须压过固件编译期值（B 屏的 `FPC2_COLOR_COUNT`、A 屏的
+    `EPD_A_PANEL_COLORS`）：同一个后台要同时服务黑白/三色/四色板，运营在
+    「屏幕规格」里给某块屏选了三色，那块屏就该出三色版式（红为唯一强调色、
+    无黄色像素），选了四色才用黄色做强调。反过来若让固件请求当上限，三色板
+    固件会让后台选的四色永远是死设置。
     """
-    picked = screen_colors_from_config(dual_config)
+    which = _norm_screen(screen)
+    picked = screen_colors_from_config(dual_config, which)
     if picked is not None:
         return picked, "console"
     if isinstance(requested, int) and not isinstance(requested, bool) and requested in _PANEL_COLORS:
@@ -550,9 +573,9 @@ def _a_mode_has_data(mode: str, dual_config: Optional[dict]) -> bool:
 
 # ── A 屏：便签 / 作业 / 阅读 ─────────────────────────────────
 def render_notes(mac: str, w: int, h: int, dual_config: Optional[dict],
-                 battery: Optional[int] = None) -> Image.Image:
+                 battery: Optional[int] = None, colors: int = 2) -> Image.Image:
     scale = w / 400.0
-    img = Image.new("1", (w, h), 1)
+    img = _palette_p_image(w, h, colors) if colors >= 3 else Image.new("1", (w, h), 1)
     draw = ImageDraw.Draw(img)
     font_title = _load_cjk(max(16, int(22 * scale)))
     font_body = _load_cjk(max(13, int(16 * scale)))
@@ -582,7 +605,8 @@ def render_notes(mac: str, w: int, h: int, dual_config: Optional[dict],
         cleaned.append((text, sender, st))
 
     _draw_list_header(draw, "老师便签", f"{today.month}月{today.day}日",
-                      f"共 {len(cleaned)} 条", w, scale, font_title, font_meta, battery)
+                      f"共 {len(cleaned)} 条", w, scale, font_title, font_meta, battery,
+                       fg=3 if colors >= 3 else 0)
     if not cleaned:
         draw.text((int(14 * scale), int(70 * scale)), "暂无通知", fill=0, font=font_body)
         return img
@@ -624,9 +648,9 @@ def _collect_items(raw, text_key: str) -> list[dict]:
 
 
 def render_homework(mac: str, w: int, h: int, dual_config: Optional[dict],
-                    battery: Optional[int] = None) -> Image.Image:
+                    battery: Optional[int] = None, colors: int = 2) -> Image.Image:
     scale = w / 400.0
-    img = Image.new("1", (w, h), 1)
+    img = _palette_p_image(w, h, colors) if colors >= 3 else Image.new("1", (w, h), 1)
     draw = ImageDraw.Draw(img)
     font_title = _load_cjk(max(16, int(22 * scale)))
     font_body = _load_cjk(max(13, int(16 * scale)))
@@ -646,7 +670,8 @@ def render_homework(mac: str, w: int, h: int, dual_config: Optional[dict],
 
     done_n = sum(1 for _, d, _, _ in cleaned if d)
     _draw_list_header(draw, "今日作业", f"{today.month}月{today.day}日",
-                      f"共 {len(cleaned)} 项", w, scale, font_title, font_meta, battery)
+                      f"共 {len(cleaned)} 项", w, scale, font_title, font_meta, battery,
+                       fg=3 if colors >= 3 else 0)
     if not cleaned:
         draw.text((int(14 * scale), int(70 * scale)), "暂无作业", fill=0, font=font_body)
         return img
@@ -687,9 +712,9 @@ def render_homework(mac: str, w: int, h: int, dual_config: Optional[dict],
 
 
 def render_reading(mac: str, w: int, h: int, dual_config: Optional[dict],
-                   battery: Optional[int] = None) -> Image.Image:
+                   battery: Optional[int] = None, colors: int = 2) -> Image.Image:
     scale = w / 400.0
-    img = Image.new("1", (w, h), 1)
+    img = _palette_p_image(w, h, colors) if colors >= 3 else Image.new("1", (w, h), 1)
     draw = ImageDraw.Draw(img)
     font_title = _load_cjk(max(16, int(22 * scale)))
     font_body = _load_cjk(max(13, int(16 * scale)))
@@ -701,7 +726,8 @@ def render_reading(mac: str, w: int, h: int, dual_config: Optional[dict],
     cleaned = [(it["title"], (it.get("progress") or "").strip()) for it in items]
 
     _draw_list_header(draw, "阅读任务", f"{today.month}月{today.day}日",
-                      f"共 {len(cleaned)} 项", w, scale, font_title, font_meta, battery)
+                      f"共 {len(cleaned)} 项", w, scale, font_title, font_meta, battery,
+                       fg=3 if colors >= 3 else 0)
     if not cleaned:
         draw.text((int(14 * scale), int(70 * scale)), "暂无阅读任务", fill=0, font=font_body)
         return img
@@ -1773,7 +1799,8 @@ def _render_dual_screen_inner(mac: str, screen: str, w: int, h: int, colors: int
             if scene_key == "finance" and mode in ("finance-watch", "finance-summary", "finance-market"):
                 try:
                     from . import finance as _finance
-                    return _finance.render_a_screen(a_cfg, cfg_root, w, h, mac=mac)
+                    return _finance.render_a_screen(a_cfg, cfg_root, w, h, mac=mac,
+                                                    colors=colors)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("[FINANCE] A screen fallback: %s", exc)
             if scene_key in ("family", "health", "finance", "office", "custom") and mode not in ("notes", "homework", "reading", "album"):
@@ -1792,12 +1819,12 @@ def _render_dual_screen_inner(mac: str, screen: str, w: int, h: int, colors: int
             if mode != "album" and not _a_mode_has_data(mode, dual_config) and photos:
                 return render_album(mac, w, h, colors, dual_config)
             if mode == "homework":
-                return render_homework(mac, w, h, dual_config, battery=battery)
+                return render_homework(mac, w, h, dual_config, battery=battery, colors=colors)
             if mode == "reading":
-                return render_reading(mac, w, h, dual_config, battery=battery)
+                return render_reading(mac, w, h, dual_config, battery=battery, colors=colors)
             if mode == "album":
                 return render_album(mac, w, h, colors, dual_config)
-            return render_notes(mac, w, h, dual_config, battery=battery)
+            return render_notes(mac, w, h, dual_config, battery=battery, colors=colors)
         # B 屏
         cfg_root = dual_config or {}
         scene_key = str(cfg_root.get("sceneKey") or DEFAULT_SCENE_KEY)

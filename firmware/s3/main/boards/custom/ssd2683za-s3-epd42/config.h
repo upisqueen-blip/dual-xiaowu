@@ -100,13 +100,18 @@
 #define EPD_CS_PIN_FPC2    EPD_COLOR_CS_PIN
 #define EPD_BUSY_PIN_FPC2  EPD_COLOR_BUSY_PIN
 
-// A 座（FPC2，CS=GPIO9 / BUSY=GPIO12）当前插的是三色屏，不是 SSD1619 黑白屏。
-// 1 = A 屏的上屏动作全部转交三色驱动（Uc1679Display），SSD1619 的初始化与
-//     波形命令一条都不发——那个座上的控制器已经不认这套命令集。
-// 0 = 原设计，A 座走 SSD1619 黑白快刷。
-// 换回黑白屏时改回 0 即可，驱动代码两侧都保留。
-#ifndef EPD_A_SCREEN_IS_BWR
-#define EPD_A_SCREEN_IS_BWR 1
+// A 座（FPC1，CS=GPIO39 / BUSY=GPIO40）插什么面板：2 / 3 / 4 对应
+//   2 = SSD1619 黑白快刷（1bpp BMP，本地 LVGL 快刷）
+//   3 = UC1679 / SSD1683 三色 BWR（两平面，全刷 20~30 s）
+//   4 = SSD2683ZA 四色 BWRY（2bpp packed，全刷）
+// 后台「屏幕规格 → A 屏面板色彩」独立选择，两者必须与实物一致：
+// 后台决定按几色出图，这个宏决定用哪个驱动把帧送上玻璃。
+// 换屏只改这一个数字，三种驱动代码都在。
+#ifndef EPD_A_PANEL_COLORS
+#define EPD_A_PANEL_COLORS 3
+#endif
+#if EPD_A_PANEL_COLORS != 2 && EPD_A_PANEL_COLORS != 3 && EPD_A_PANEL_COLORS != 4
+#error "EPD_A_PANEL_COLORS 只能是 2 / 3 / 4"
 #endif
 
 // 双屏配置开关：1 = FPC1 快刷屏 + FPC2 SSD2683ZA 四色屏同时驱动；

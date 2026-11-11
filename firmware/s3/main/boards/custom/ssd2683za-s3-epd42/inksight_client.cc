@@ -777,7 +777,9 @@ bool InkSightClient::Load2bpp(NetworkInterface* network,
                               uint8_t* red_plane,
                               std::string& error,
                               int* server_refresh_minutes,
-                              bool* device_unbound_out) {
+                              bool* device_unbound_out,
+                              int panel_colors,
+                              const char* panel_screen) {
     static constexpr size_t kRaw2bppBytes = kColorWidth * kColorHeight / 4;
     static constexpr size_t kPlaneBytes = kColorStride * kColorHeight;
 
@@ -800,13 +802,17 @@ bool InkSightClient::Load2bpp(NetworkInterface* network,
     url += std::to_string(kColorWidth);
     url += "&h=";
     url += std::to_string(kColorHeight);
-    // colors 跟随面板真实色数（menuconfig FPC2_PANEL_COLORS_3/4 → FPC2_COLOR_COUNT）：
+    // colors 跟随目标面板的真实色数：B 屏默认取 menuconfig FPC2_PANEL_COLORS_3/4
+    // → FPC2_COLOR_COUNT；A 座换成彩色屏后由调用方显式传入（EPD_A_PANEL_COLORS）。
     // 3 色面板（BWR）请求 colors=3，后端据此把高亮文字画成白色（红底白字），
     // 否则红字落在红底上看不清；4 色面板（BWRY）仍请求 colors=4（黄底红字）。
-    url += "&v=3.2&bpp=2&colors=" + std::to_string(FPC2_COLOR_COUNT);
-    // 显式声明这是 B 屏裸帧请求：后端早年靠 persona==DUAL_B 判断裸帧，persona
-    // 默认空串时会给回 BMP（15662 字节），被当成 30000 字节裸帧解析 → 屏幕一片红。
-    url += "&screen=B";
+    const int req_colors = panel_colors > 0 ? panel_colors : FPC2_COLOR_COUNT;
+    url += "&v=3.2&bpp=2&colors=" + std::to_string(req_colors);
+    // 显式声明这是哪块屏的裸帧请求：后端早年靠 persona==DUAL_B 判断裸帧，
+    // persona 默认空串时会给回 BMP（15662 字节），被当成 30000 字节裸帧解析
+    // → 屏幕一片红。A 座换彩色屏后同样要声明 screen=A。
+    url += "&screen=";
+    url += (panel_screen != nullptr && panel_screen[0] != '\0') ? panel_screen : "B";
     if (!device_id.empty()) url += "&mac=" + device_id;
     if (!persona.empty()) {
         url += "&persona=";

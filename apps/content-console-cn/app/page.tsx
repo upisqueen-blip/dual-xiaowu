@@ -17,6 +17,28 @@ type NavKey = "dashboard" | "scenes" | "screens" | "content" | "apps" | "finance
 // 番茄钟参数：与后端 pomodoro.Preset 字段一一对应，缺省项由后端回落到内置预设。
 type PomodoroPreset = { key?: string; name?: string; focus_minutes?: number; short_break_minutes?: number; long_break_minutes?: number; long_break_after?: number };
 type ScreenConfig = { title: string; source: string; refresh: string; modules: string[]; mode?: string; appId?: string; preset?: PomodoroPreset };
+// 屏幕规格：两块屏尺寸一致（同一块 PCB 的两个座），但面板色数各自独立——
+// 允许 A 黑白 + B 四色、A 三色 + B 三色这类组合。色数只影响后端出图版式。
+type ScreenSpec = { size: "4.2" | "5.83"; aColors: 2 | 3 | 4; bColors: 2 | 3 | 4 };
+const PANEL_COLOR_OPTIONS = [
+  { value: 2, label: "黑白（2 色）" },
+  { value: 3, label: "黑白红（3 色）" },
+  { value: 4, label: "黑白红黄（4 色）" },
+] as const;
+const panelColorName = (c: number) => (c === 2 ? "黑白" : c === 3 ? "黑白红" : "黑白红黄");
+
+// 兼容历史配置：旧版只有一个 colors（语义固定是 B 屏 FPC2），A 屏当年恒为黑白。
+function normalizeScreenSpec(raw: unknown): ScreenSpec | null {
+  if (!raw || typeof raw !== "object") return null;
+  const s = raw as { size?: string; colors?: number; aColors?: number; bColors?: number };
+  if (s.size !== "4.2" && s.size !== "5.83") return null;
+  const pick = (v: unknown, fallback: 2 | 3 | 4): 2 | 3 | 4 => (v === 2 || v === 3 || v === 4 ? v : fallback);
+  return {
+    size: s.size,
+    aColors: pick(s.aColors, 2),
+    bColors: pick(s.bColors ?? s.colors, 3),
+  };
+}
 type DualWeatherPreview = { city: string; today_temp: string; current_temp?: string; today_desc: string; today_code?: number; today_low: string; today_high: string; today_humidity?: string; today_wind_dir?: string; today_wind_level?: string; sunrise?: string; sunset?: string; advice?: string; forecast?: { day: string; date: string; temp_range: string; desc: string; code?: number }[]; feels_like?: string | number | null; city_pinyin?: string; solar_term?: string; solar_term_day?: string; updated_at?: string; lunar_date?: string; lunar_year?: string; lunar_zodiac?: string; plate_limit?: string };
 type Scene = { name: string; eyebrow: string; desc: string; icon: string; a: ScreenConfig; b: ScreenConfig };
 type User = { user_id: number; username: string };
@@ -132,9 +154,10 @@ export default function DualConsole() {
     Object.fromEntries(Object.entries(scenes).map(([k, v]) => [k, { a: v.a, b: v.b }])) as Record<SceneKey, { a: ScreenConfig; b: ScreenConfig }>,
   );
   const [content, setContent] = useState<ContentState>(() => makeDefaultContent());
-  // 屏幕规格（A/B 屏尺寸一致；色彩为 B 屏 FPC2 面板能力，需与硬件一致）：
-  // size = 4.2" / 5.83"；colors = 2(黑白) / 3(黑白红) / 4(黑白红黄)。
-  const [screen, setScreen] = useState<{ size: "4.2" | "5.83"; colors: 2 | 3 | 4 }>({ size: "4.2", colors: 4 });
+  // 屏幕规格（A/B 尺寸一致，色彩各自独立）：
+  // size = 4.2" / 5.83"；aColors/bColors = 2(黑白) / 3(黑白红) / 4(黑白红黄)。
+  // 后台按各自色数出图，与固件编译期宏解耦——换屏只需改这里。
+  const [screen, setScreen] = useState<ScreenSpec>({ size: "4.2", aColors: 3, bColors: 3 });
 
   const scene = scenes[sceneKey];
   const selectedDevice = devices.find((d) => d.mac === deviceMac) || devices[0];
@@ -187,9 +210,9 @@ export default function DualConsole() {
         if (saved.config) setConfig(() => normalizeConfig(saved.config));
         if (saved.deviceMac) setDeviceMac(saved.deviceMac);
         if (saved.content) applySavedContent(saved.content);
-        if (saved.screen && (saved.screen.size === "4.2" || saved.screen.size === "5.83")) {
-          const c = saved.screen.colors;
-          setScreen({ size: saved.screen.size, colors: c === 2 || c === 3 || c === 4 ? c : 4 });
+        if (saved.screen) {
+          const spec = normalizeScreenSpec(saved.screen);
+          if (spec) setScreen(spec);
         }
       } catch { /* ignore damaged local draft */ }
     }
@@ -222,7 +245,7 @@ export default function DualConsole() {
             sceneKey?: string;
             config?: Record<string, { a?: Partial<ScreenConfig>; b?: Partial<ScreenConfig> }>;
             content?: Record<string, unknown>;
-            screen?: { size?: string; colors?: number };
+            screen?: { size?: string; colors?: number; aColors?: number; bColors?: number };
           } | null;
         }>(`/api/device/${encodeURIComponent(mac)}/dual-config`);
         const saved = r?.config;
@@ -232,13 +255,8 @@ export default function DualConsole() {
         }
         if (saved.config) setConfig(() => normalizeConfig(saved.config));
         if (saved.content) applySavedContent(saved.content);
-        const spec = saved.screen;
-        if (spec) {
-          setScreen({
-            size: spec.size === "5.83" ? "5.83" : "4.2",
-            colors: spec.colors === 2 ? 2 : spec.colors === 3 ? 3 : 4,
-          });
-        }
+        const spec = normalizeScreenSpec(saved.screen);
+        if (spec) setScreen(spec);
       } catch { /* 离线或未登录时继续用本地草稿 */ }
     })();
     return () => { cancelled = true; };
@@ -312,7 +330,15 @@ export default function DualConsole() {
   }
 
   function buildPayload() {
-    return { version: 1, sceneKey, config, content, screen, deviceMac: selectedDevice?.mac || "", savedAt: new Date().toISOString() };
+    // `colors` 继续写 B 屏色数：旧后端/小程序/第三方只认这个字段，必须保持语义不变；
+    // aColors/bColors 是新字段，供后端分别决定 A/B 两块屏的版式。
+    const screenPayload = {
+      size: screen.size,
+      colors: screen.bColors,
+      aColors: screen.aColors,
+      bColors: screen.bColors,
+    };
+    return { version: 1, sceneKey, config, content, screen: screenPayload, deviceMac: selectedDevice?.mac || "", savedAt: new Date().toISOString() };
   }
   async function saveConfiguration() {
     const payload = buildPayload();
@@ -345,8 +371,8 @@ export default function DualConsole() {
     setSavedAt(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }));
     try {
       await api(`/api/device/${encodeURIComponent(selectedDevice.mac)}/dual-config`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-      const colorLabel = screen.colors === 2 ? "黑白" : screen.colors === 3 ? "三色（黑白红）" : "四色（黑白红黄）";
-      notify(`已保存并下发：B 屏按${colorLabel}渲染（${selectedDevice.nickname || selectedDevice.mac}），设备最迟 1 分钟内刷新，先 A 屏再 B 屏`);
+      const colorLabel = `A 屏${panelColorName(screen.aColors)} / B 屏${panelColorName(screen.bColors)}`;
+      notify(`已保存并下发：${colorLabel}渲染（${selectedDevice.nickname || selectedDevice.mac}），设备最迟 1 分钟内刷新，先 A 屏再 B 屏`);
     } catch (error) {
       const msg = error instanceof Error && error.message ? error.message : "网络错误";
       notify(`下发失败：${msg}（本地模式已保存）`);
@@ -390,8 +416,8 @@ export default function DualConsole() {
           <a className="developer-link" href={developerCenterUrl}><Code2 size={18}/>开发者中心</a>
         </nav>
         <div className="sidebar-foot">
-          <div className="hardware-map"><span><i className="dot-a"/>A 屏 · FPC1</span><small>黑白快刷</small></div>
-          <div className="hardware-map"><span><i className="dot-b"/>B 屏 · FPC2</span><small>三色 / 四色</small></div>
+          <div className="hardware-map"><span><i className="dot-a"/>A 屏 · FPC1</span><small>黑白 / 三色 / 四色</small></div>
+          <div className="hardware-map"><span><i className="dot-b"/>B 屏 · FPC2</span><small>黑白 / 三色 / 四色</small></div>
           <div className="profile">
             <CircleUserRound size={28}/><div><b>{user?.username || "未登录"}</b><span>{user ? "设备管理员" : "登录后管理设备"}</span></div>
             {user ? <button className="profile-exit" aria-label="退出登录" title="退出登录" onClick={logout}><LogOut size={15}/><span>退出</span></button> : <button className="profile-exit" onClick={() => setAuthOpen(true)}><LogIn size={15}/><span>登录</span></button>}
@@ -1092,7 +1118,7 @@ function ConfigGuide({ onStep }: { onStep: (i: number) => void }) {
   );
 }
 
-function ScreenEditor({ scene, sceneKey, value, update, save, savedAt, content, apply, hasDevice, deviceMac, screen, setScreen }: { scene: Scene; sceneKey: SceneKey; value: { a: ScreenConfig; b: ScreenConfig }; update: (s: "a"|"b", p: Partial<ScreenConfig>) => void; save: () => void; savedAt: string; content: ContentState; apply: () => void; hasDevice: boolean; deviceMac: string; screen: { size: "4.2" | "5.83"; colors: 2 | 3 | 4 }; setScreen: (s: { size: "4.2" | "5.83"; colors: 2 | 3 | 4 }) => void }) {
+function ScreenEditor({ scene, sceneKey, value, update, save, savedAt, content, apply, hasDevice, deviceMac, screen, setScreen }: { scene: Scene; sceneKey: SceneKey; value: { a: ScreenConfig; b: ScreenConfig }; update: (s: "a"|"b", p: Partial<ScreenConfig>) => void; save: () => void; savedAt: string; content: ContentState; apply: () => void; hasDevice: boolean; deviceMac: string; screen: ScreenSpec; setScreen: (s: ScreenSpec) => void }) {
   const { weatherPreview, weatherLoading, weatherError } = useDualWeatherPreview(sceneKey === "family" && value.a.mode === "family-weather", deviceMac, content.weatherCity);
   return <>
     <div className="page-intro row"><div><span className="kicker">{scene.name.toUpperCase()} SCENE</span><h2>{scene.name}场景 · 双屏配置</h2><p>A 屏负责快速文字信息，B 屏负责彩色结构与图像。</p></div><div className="save-state"><ShieldCheck size={17}/>{savedAt ? `模式保存于 ${savedAt}` : "配置尚未保存"}</div></div>
@@ -1108,17 +1134,17 @@ function ScreenEditor({ scene, sceneKey, value, update, save, savedAt, content, 
   </>;
 }
 
-function ScreenSettings({ value, onChange, sceneKey, aMode, bMode, deviceMac }: { value: { size: "4.2" | "5.83"; colors: 2 | 3 | 4 }; onChange: (s: { size: "4.2" | "5.83"; colors: 2 | 3 | 4 }) => void; sceneKey: SceneKey; aMode: string; bMode: string; deviceMac: string }) {
-  const colorNote = value.colors === 2
+function ScreenSettings({ value, onChange, sceneKey, aMode, bMode, deviceMac }: { value: ScreenSpec; onChange: (s: ScreenSpec) => void; sceneKey: SceneKey; aMode: string; bMode: string; deviceMac: string }) {
+  const colorNote = (colors: number) => colors === 2
     ? "黑白双色：无彩色强调，全部信息用黑/白网点表达。"
-    : value.colors === 3
+    : colors === 3
       ? "三色版式：黑白红。红色是唯一强调色，不输出任何黄色像素。"
       : "四色版式：黑白红黄。黄色用于标题条/节气/日期等版式强调，红色留给涨幅与警示。";
   // 后端真实出图（与设备取图同一套渲染代码）：切换色数/场景/模式都能立即看到效果。
   // 已选设备时也带上 sceneKey/bMode（后端按覆盖参数优先），否则切到「家庭」页，
   // 预览仍会按设备里残留的 sceneKey 出图（例如上次停在理财，B 屏一直是板块动向）；
   // mac 只用于取该设备的真实内容数据（日程/待办/自选股），不决定版式。
-  // A 屏是黑白 1bit 面板（FPC1），与 B 屏色数无关，固定 colors=2。
+  // 两块屏各按自己的色数渲染：A 读 aColors、B 读 bColors。
   const liveQuery = (persona: "DUAL_A" | "DUAL_B", colors: number, mode: string) => [
     `persona=${persona}&w=400&h=300&colors=${colors}&forceColors=${colors}`,
     `sceneKey=${encodeURIComponent(sceneKey)}`,
@@ -1126,40 +1152,45 @@ function ScreenSettings({ value, onChange, sceneKey, aMode, bMode, deviceMac }: 
     deviceMac ? `mac=${encodeURIComponent(deviceMac)}` : "",
     `v=${colors}-${encodeURIComponent(sceneKey)}-${encodeURIComponent(mode)}`,
   ].filter(Boolean).join("&");
-  const aSrc = `${BASE_PATH}/api/preview?${liveQuery("DUAL_A", 2, aMode)}`;
-  const bSrc = `${BASE_PATH}/api/preview?${liveQuery("DUAL_B", value.colors, bMode)}`;
-  const colorName = value.colors === 3 ? "三色" : value.colors === 4 ? "四色" : "黑白";
+  const aSrc = `${BASE_PATH}/api/preview?${liveQuery("DUAL_A", value.aColors, aMode)}`;
+  const bSrc = `${BASE_PATH}/api/preview?${liveQuery("DUAL_B", value.bColors, bMode)}`;
+  const aName = panelColorName(value.aColors);
+  const bName = panelColorName(value.bColors);
   // 模式用中文标签展示，别把内部 key（welcome / album-tf）暴露到界面上
   const modeLabel = (kind: "a" | "b", key: string) =>
     SCENE_MODES[sceneKey]?.[kind].find((m) => m.key === key)?.label || key;
+  const colorSelect = (kind: "a" | "b") => {
+    const key = kind === "a" ? "aColors" : "bColors";
+    return <select className="cs-input" value={String(value[key])}
+      onChange={(e) => onChange({ ...value, [key]: parseInt(e.target.value, 10) as 2 | 3 | 4 })}>
+      {PANEL_COLOR_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+    </select>;
+  };
   return <div className="card-pad screen-settings">
-    <div className="tt-grid-head"><span>屏幕规格</span><span className="tt-hint">决定 B 屏按几色渲染，需与设备实际面板一致（三色板选四色时，黄色会按红色出）</span></div>
+    <div className="tt-grid-head"><span>屏幕规格</span><span className="tt-hint">A/B 两块屏各自选色数，需与设备实际面板一致（三色板选四色时，黄色会按红色出）</span></div>
     <div className="ss-row">
       <label>屏幕尺寸<select className="cs-input" value={value.size} onChange={(e) => onChange({ ...value, size: e.target.value as "4.2" | "5.83" })}>
         <option value="4.2">4.2 寸（400 × 300）</option>
         <option value="5.83">5.83 寸（648 × 480）</option>
       </select></label>
-      <label>B 屏面板色彩（FPC2）<select className="cs-input" value={String(value.colors)} onChange={(e) => onChange({ ...value, colors: parseInt(e.target.value, 10) as 2 | 3 | 4 })}>
-        <option value={2}>黑白（2 色）</option>
-        <option value={3}>黑白红（3 色）</option>
-        <option value={4}>黑白红黄（4 色）</option>
-      </select></label>
+      <label>A 屏面板色彩（FPC1）{colorSelect("a")}</label>
+      <label>B 屏面板色彩（FPC2）{colorSelect("b")}</label>
     </div>
-    <p className="ss-note">{colorNote}切换后点「应用到设备」生效（设备按此色数出图，不再依赖固件编译期配置）。</p>
+    <p className="ss-note">A 屏{colorNote(value.aColors)}　B 屏{colorNote(value.bColors)}　两块屏可自由组合（例如 A 黑白 + B 四色）。切换后点「应用到设备」生效，设备按此色数出图，不再依赖固件编译期配置。</p>
     <div className="ss-live">
       <div className="ss-live-item">
         <img src={aSrc} alt="A 屏后端渲染效果"/>
         <div>
-          <b>A 屏 · 黑白 1bit</b>
-          <span>400 × 300 · {modeLabel("a", aMode)}</span>
+          <b>A 屏 · {aName}</b>
+          <span>400 × 300 · {modeLabel("a", aMode)}{deviceMac ? ` · 按${aName}渲染` : " · 演示模板"}</span>
           <a href={aSrc} target="_blank" rel="noreferrer">新窗口打开</a>
         </div>
       </div>
       <div className="ss-live-item">
         <img src={bSrc} alt="B 屏后端渲染效果"/>
         <div>
-          <b>B 屏 · {colorName}</b>
-          <span>400 × 300 · {modeLabel("b", bMode)}{deviceMac ? ` · 按${colorName}渲染` : " · 演示模板"}</span>
+          <b>B 屏 · {bName}</b>
+          <span>400 × 300 · {modeLabel("b", bMode)}{deviceMac ? ` · 按${bName}渲染` : " · 演示模板"}</span>
           <a href={bSrc} target="_blank" rel="noreferrer">新窗口打开</a>
         </div>
       </div>
@@ -1301,7 +1332,7 @@ function ScreenForm({ kind, sceneKey, value, onChange }: { kind: "a"|"b"; sceneK
       ];
   const refreshOptions = ["每 5 分钟", "每 10 分钟", "每 15 分钟", "每 30 分钟", "每 12 小时", "每 24 小时"];
   return <div className={`screen-form ${kind}`}>
-    <div className="screen-form-head"><div><span>{kind.toUpperCase()} 屏</span><h3>{kind === "a" ? "FPC1 · 黑白快刷" : "FPC2 · 三色 / 四色"}</h3></div><span className="screen-status"><i/>已启用</span></div>
+    <div className="screen-form-head"><div><span>{kind.toUpperCase()} 屏</span><h3>{kind === "a" ? "FPC1 · 色彩可选" : "FPC2 · 色彩可选"}</h3></div><span className="screen-status"><i/>已启用</span></div>
     <label>屏幕内容名称<input value={value.title} onChange={(e) => onChange({ title: e.target.value })}/></label>
     <label>{kind.toUpperCase()} 屏模式<select value={value.mode || modes[0].key} onChange={(e) => { const src = autoSource(e.target.value); onChange({ mode: e.target.value, ...(src ? { source: src } : {}) }); }}>{modes.map((m) => <option key={m.key} value={m.key}>{m.label}</option>)}</select></label>
     {value.mode === "published-app" ? (
@@ -1335,7 +1366,7 @@ function ScreenForm({ kind, sceneKey, value, onChange }: { kind: "a"|"b"; sceneK
   </div>;
 }
 
-function ScreenPreview({ kind, sceneKey, scene, config, content, screen, deviceMac, weatherPreview, weatherLoading, weatherError }: { kind: "a"|"b"; sceneKey: SceneKey; scene: string; config: ScreenConfig; content: ContentState; screen: { size: "4.2" | "5.83"; colors: 2 | 3 | 4 }; deviceMac?: string; weatherPreview?: DualWeatherPreview | null; weatherLoading?: boolean; weatherError?: string }) {
+function ScreenPreview({ kind, sceneKey, scene, config, content, screen, deviceMac, weatherPreview, weatherLoading, weatherError }: { kind: "a"|"b"; sceneKey: SceneKey; scene: string; config: ScreenConfig; content: ContentState; screen: ScreenSpec; deviceMac?: string; weatherPreview?: DualWeatherPreview | null; weatherLoading?: boolean; weatherError?: string }) {
   const dims = screen.size === "5.83" ? "648 × 480" : "400 × 300";
   let body: React.ReactNode;
   if (sceneKey === "study" && kind === "a") {
@@ -1346,7 +1377,7 @@ function ScreenPreview({ kind, sceneKey, scene, config, content, screen, deviceM
     const hasCourse = (content.courseTable.periods || []).some((_, p) => !!content.courseTable.grid?.[todayIdx]?.[p]?.name);
     body = !hasCourse && (content.album?.photos?.length || 0) > 0
       ? <AlbumPreview album={content.album} />
-      : <CoursePreview ct={content.courseTable} colors={screen.colors} />;
+      : <CoursePreview ct={content.courseTable} colors={screen.bColors} />;
   } else if (sceneKey === "health") {
     body = <SceneModePreview title={config.title} modules={config.modules} note="提醒内容可在内容管理中维护" />;
   } else if (sceneKey === "finance") {
@@ -1358,7 +1389,7 @@ function ScreenPreview({ kind, sceneKey, scene, config, content, screen, deviceM
     // 系统场景（出厂默认）：A 欢迎页/便签/相册，B 天气/相册，全部走后端真实出图，
     // 前端不复刻版式——设备取图与后台看到的是同一份 render.py 输出。
     const persona = kind === "a" ? "DUAL_A" : "DUAL_B";
-    const colors = kind === "b" ? screen.colors : 2;
+    const colors = kind === "b" ? screen.bColors : screen.aColors;
     const mode = config.mode || (kind === "a" ? "xiaowu-today" : "weather");
     const liveParams = [
       `persona=${persona}`,
@@ -1378,7 +1409,7 @@ function ScreenPreview({ kind, sceneKey, scene, config, content, screen, deviceM
     // 与设备实际出图完全不同，用户没法把两边对上）。
     // 注意：内容改动需要点「保存模式」后预览才会刷新。
     const persona = kind === "a" ? "DUAL_A" : "DUAL_B";
-    const colors = kind === "b" ? screen.colors : 2;
+    const colors = kind === "b" ? screen.bColors : screen.aColors;
     const familyMode = config.mode || "family";
     const liveParams = [
       `persona=${persona}`,
@@ -1395,7 +1426,7 @@ function ScreenPreview({ kind, sceneKey, scene, config, content, screen, deviceM
   } else if (config.mode === "pomodoro") {
     // 番茄钟按设备真实会话出图，前端不复刻版式——这样预览和屏上永远一致。
     const persona = kind === "a" ? "DUAL_A" : "DUAL_B";
-    const colors = kind === "b" ? screen.colors : 2;
+    const colors = kind === "b" ? screen.bColors : screen.aColors;
     body = <div className="kline-full"><img className="kline-full-img" alt="专注番茄"
       src={`${BASE_PATH}/api/preview?persona=${persona}&w=400&h=300&colors=${colors}&sceneKey=${encodeURIComponent(sceneKey)}&aMode=pomodoro&bMode=pomodoro&mac=${encodeURIComponent(deviceMac || "")}&v=pomodoro`} /></div>;
   } else if (sceneKey === "office") {
@@ -1403,8 +1434,8 @@ function ScreenPreview({ kind, sceneKey, scene, config, content, screen, deviceM
   } else {
     body = <SceneModePreview title={config.title} modules={config.modules} note="自定义场景" />;
   }
-  const colorBadge = kind === "b" ? (screen.colors === 2 ? "黑白" : screen.colors === 3 ? "黑白红" : "黑白红黄") : null;
-  return <div className={`preview-card ${kind}`}><div className="preview-meta"><span>实时预览</span><small>{dims}{colorBadge ? ` · ${colorBadge}` : ""}</small></div>{body}</div>;
+  const colorBadge = panelColorName(kind === "b" ? screen.bColors : screen.aColors);
+  return <div className={`preview-card ${kind}`}><div className="preview-meta"><span>实时预览</span><small>{dims}` · ${colorBadge}`</small></div>{body}</div>;
 }
 
 function CalendarPreview() { return <div className="calendar-preview"><div className="week">{["一","二","三","四","五","六","日"].map(v=><b key={v}>{v}</b>)}</div><div className="days">{Array.from({length:28},(_,i)=><span key={i} className={i===15?"today":i===17?"event":""}>{i+1}</span>)}</div><p><i/>今天 · 家庭日晚餐</p></div>; }
@@ -1537,7 +1568,7 @@ function FinanceModePreview({ kind, mode }: { kind: "a" | "b"; mode: string }) {
 }
 function BarsPreview({ photo }: { photo?: boolean }) { return photo ? <div className="photo-preview"><span>照片 / 海报预览</span><div/><p>来自后台相册 · 3 张</p></div> : <div className="bars-preview"><div>{[28,42,35,58,51,67,62,79,70,86].map((v,i)=><i key={i} style={{height:`${v}%`}}/>)}</div><p><span>黄金 AU</span><b>▲ 0.84%</b></p><p><span>沪深 300</span><b>▼ 0.26%</b></p></div>; }
 
-function ScreenSummary({ kind, config }: { kind: "a"|"b"; config: ScreenConfig }) { return <div className={`screen-summary ${kind}`}><div className="summary-head"><span>{kind.toUpperCase()} 屏</span><div><b>{config.title}</b><small>{kind === "a" ? "FPC1 · 黑白快刷" : "FPC2 · 三/四色"}</small></div><i>已启用</i></div><div className="summary-body">{config.modules.slice(0,4).map(m=><span key={m}><Check size={13}/>{m}</span>)}</div><div className="summary-foot"><span><RefreshCw size={13}/>{config.refresh}</span><span><Cloud size={13}/>{config.source}</span></div></div>; }
+function ScreenSummary({ kind, config }: { kind: "a"|"b"; config: ScreenConfig }) { return <div className={`screen-summary ${kind}`}><div className="summary-head"><span>{kind.toUpperCase()} 屏</span><div><b>{config.title}</b><small>{kind === "a" ? "FPC1 · 色彩可选" : "FPC2 · 色彩可选"}</small></div><i>已启用</i></div><div className="summary-body">{config.modules.slice(0,4).map(m=><span key={m}><Check size={13}/>{m}</span>)}</div><div className="summary-foot"><span><RefreshCw size={13}/>{config.refresh}</span><span><Cloud size={13}/>{config.source}</span></div></div>; }
 
 function DeviceManager({ devices, user, refresh, openAuth, openPair, notify, choose }: { devices: Device[]; user: User|null; refresh:()=>Promise<void>; openAuth:()=>void; openPair:()=>void; notify:(m:string)=>void; choose:(m:string)=>void }) {
   async function unbind(device: Device) { if (!confirm(`确认解绑 ${device.nickname || device.mac}？`)) return; try { await api(`/api/user/devices/${encodeURIComponent(device.mac)}`, { method: "DELETE" }); await refresh(); notify("设备已解绑"); } catch (e) { notify((e as Error).message); } }
@@ -2553,7 +2584,7 @@ const CONTENT_TABS_BY_SCENE: Record<SceneKey, ContentTab[]> = {
   custom: ["notes", "album", "messages", "history"],
 };
 
-function ContentStudio({ content, setContent, save, savedAt, notify, apply, hasDevice, deviceMac, screen, sceneKey, aMode, bMode, user, device }: { content: ContentState; setContent: React.Dispatch<React.SetStateAction<ContentState>>; save: () => void; savedAt: string; notify: (m: string) => void; apply: () => void; hasDevice: boolean; deviceMac: string; screen: { size: "4.2" | "5.83"; colors: 2 | 3 | 4 }; sceneKey: SceneKey; aMode: string; bMode: string; user: User | null; device?: Device }) {
+function ContentStudio({ content, setContent, save, savedAt, notify, apply, hasDevice, deviceMac, screen, sceneKey, aMode, bMode, user, device }: { content: ContentState; setContent: React.Dispatch<React.SetStateAction<ContentState>>; save: () => void; savedAt: string; notify: (m: string) => void; apply: () => void; hasDevice: boolean; deviceMac: string; screen: ScreenSpec; sceneKey: SceneKey; aMode: string; bMode: string; user: User | null; device?: Device }) {
   const { weatherPreview, weatherLoading, weatherError } = useDualWeatherPreview(sceneKey === "family" && aMode === "family-weather", deviceMac, content.weatherCity);
   const [tab, setTab] = useState<ContentTab>("notes");
   const messages = useMessages(deviceMac);
@@ -3600,20 +3631,21 @@ function aModePreview(mode: string, content: ContentState): React.ReactNode {
   return <NotesPreview notes={content.notes} />;
 }
 
-// 双屏实时预览：A 屏=便签/作业/阅读（黑白），B 屏=课程表（彩色），编辑时联动刷新
-function DualPreview({ content, screen, sceneKey, aMode, bMode, weatherPreview, weatherLoading, weatherError }: { content: ContentState; screen: { size: "4.2" | "5.83"; colors: 2 | 3 | 4 }; sceneKey: SceneKey; aMode?: string; bMode?: string; weatherPreview?: DualWeatherPreview | null; weatherLoading?: boolean; weatherError?: string }) {
+// 双屏实时预览：A 屏=便签/作业/阅读，B 屏=课程表；两块屏各自按面板色数出图
+function DualPreview({ content, screen, sceneKey, aMode, bMode, weatherPreview, weatherLoading, weatherError }: { content: ContentState; screen: ScreenSpec; sceneKey: SceneKey; aMode?: string; bMode?: string; weatherPreview?: DualWeatherPreview | null; weatherLoading?: boolean; weatherError?: string }) {
   const dims = screen.size === "5.83" ? "648 × 480" : "400 × 300";
-  const bColor = screen.colors === 2 ? "黑白" : screen.colors === 3 ? "黑白红" : "黑白红黄";
+  const bColor = panelColorName(screen.bColors);
+  const aColor = panelColorName(screen.aColors);
   const mode = aMode || defaultMode(sceneKey, "a");
   const bModeKey = bMode || defaultMode(sceneKey, "b");
   const bModeText = (SCENE_MODES[sceneKey]?.b as { key: string; label: string }[] | undefined)?.find((m) => m.key === bModeKey)?.label || "课程表";
   const family = sceneKey === "family";
   return (
     <div className="card-pad dual-preview-card">
-      <div className="tt-grid-head"><span>双屏实时预览</span><span className="tt-hint">{family ? `A 屏${aMode === "family-weather" ? "天气" : aMode === "family" ? "家庭共享看板" : "家庭提醒"} · B 屏${bMode === "calendar" ? "家庭日程" : bMode === "family" ? "家庭共享看板" : "相册"}` : `A 屏${aModeLabel(mode)}（黑白快刷） · B 屏${bModeText}（${bColor}）`}，编辑即时刷新</span></div>
+      <div className="tt-grid-head"><span>双屏实时预览</span><span className="tt-hint">{family ? `A 屏${aMode === "family-weather" ? "天气" : aMode === "family" ? "家庭共享看板" : "家庭提醒"} · B 屏${bMode === "calendar" ? "家庭日程" : bMode === "family" ? "家庭共享看板" : "相册"}` : `A 屏${aModeLabel(mode)}（${aColor}） · B 屏${bModeText}（${bColor}）`}，编辑即时刷新</span></div>
       <div className="dual-preview">
         <div className="preview-card a">
-          <div className="preview-meta"><span>实时预览 · A 屏</span><small>{dims}</small></div>
+          <div className="preview-meta"><span>实时预览 · A 屏</span><small>{dims} · {aColor}</small></div>
           {family ? aMode === "family-weather"
             ? <WeatherBoard data={weatherPreview} loading={!!weatherLoading} error={weatherError || ""} city={content.weatherCity || "设备城市"} />
             : <FamilyTodayScreen content={content} mode={aMode} />
@@ -3629,13 +3661,13 @@ function DualPreview({ content, screen, sceneKey, aMode, bMode, weatherPreview, 
             const hasCourse = (content.courseTable.periods || []).some((_, p) => !!content.courseTable.grid?.[todayIdx]?.[p]?.name);
             return !hasCourse && (content.album?.photos?.length || 0) > 0
               ? <AlbumPreview album={content.album} />
-              : <CoursePreview ct={content.courseTable} colors={screen.colors} />;
+              : <CoursePreview ct={content.courseTable} colors={screen.bColors} />;
           })()}
         </div>
       </div>
       <div className="dp-hardware">
-        <span><i className="dot-a" />A 屏 · FPC1 · 黑白快刷 SSD1619（{dims}）</span>
-        <span><i className="dot-b" />B 屏 · FPC2 · SSD2683ZA（{dims} · {bColor}）</span>
+        <span><i className="dot-a" />A 屏 · FPC1 · {aColor}（{dims}）</span>
+        <span><i className="dot-b" />B 屏 · FPC2 · {bColor}（{dims}）</span>
       </div>
     </div>
   );

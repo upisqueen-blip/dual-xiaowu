@@ -170,29 +170,34 @@ def render(
         screen = "A"
     if battery is None and bat is not None:
         battery = bat
-    is_color = screen == "B"  # B 屏恒为彩色原始帧
+    # A 屏只有显式带 bpp/colors 时才走裸帧（A 座换成三色/四色屏之后的新固件会带），
+    # 老固件的 A 屏请求不带这两个参数，继续返回 1bpp BMP，无需同步升级固件。
+    is_raw = screen == "B" or want_raw
+    default_colors = 4 if screen == "B" else 2
     bpp = bpp or 2
-    colors = colors or 4
+    colors = colors if colors is not None else default_colors
     start_time = datetime.now(UTC)
 
     # 1) 无 MAC：未注册引导图
     if not mac:
-        guide = render_unregistered(w, h, colors if is_color else 2)
-        if is_color:
+        guide = render_unregistered(w, h, colors if is_raw else 2)
+        if is_raw:
             return Response(content=_pack_raw(guide, colors, bpp), media_type="application/octet-stream",
-                            headers={"X-Device-Unregistered": "no-mac"})
+                            headers={"X-Device-Unregistered": "no-mac",
+                                     "X-Panel-Colors": str(colors)})
         return Response(content=image_to_bmp_bytes(guide), media_type="image/bmp",
-                        headers={"X-Device-Unregistered": "no-mac"})
+                        headers={"X-Device-Unregistered": "no-mac", "X-Panel-Colors": "2"})
 
     mac = mac.strip().upper()
     # 2) 设备未注册（无令牌可领）→ 重新配网引导
     if not store.device_exists(mac):
-        guide = render_unregistered(w, h, colors if is_color else 2)
-        if is_color:
+        guide = render_unregistered(w, h, colors if is_raw else 2)
+        if is_raw:
             return Response(content=_pack_raw(guide, colors, bpp), media_type="application/octet-stream",
-                            headers={"X-Device-Unregistered": "no-mac"})
+                            headers={"X-Device-Unregistered": "no-mac",
+                                     "X-Panel-Colors": str(colors)})
         return Response(content=image_to_bmp_bytes(guide), media_type="image/bmp",
-                        headers={"X-Device-Unregistered": "no-mac"})
+                        headers={"X-Device-Unregistered": "no-mac", "X-Panel-Colors": "2"})
 
     # 3) 令牌校验
     if not (x_device_token and store.verify_device_token(mac, x_device_token)):
@@ -207,23 +212,24 @@ def render(
         pass
 
     owner = store.get_device_owner(mac)
-    # 配置先读出来：引导图也要跟着后台选的 B 屏色数走（三色板不该出现黄色）。
+    # 配置先读出来：引导图也要跟着后台选的那块屏色数走（三色板不该出现黄色）。
     cfg_row = store.get_content_config(mac)
     dual_cfg = cfg_row["config"] if cfg_row else None
-    eff_colors = colors
-    colors_source = "device"
-    if is_color:
-        eff_colors, colors_source = resolve_dual_colors(dual_cfg, colors)
+    if is_raw:
+        # A/B 各自读自己的色数：A 读 screen.aColors，B 读 screen.colors。
+        eff_colors, colors_source = resolve_dual_colors(
+            dual_cfg, colors, default_colors, screen)
+    else:
+        eff_colors, colors_source = 2, "mono"
     # 4) 未绑定 → 带配对码引导图
     if owner is None:
         pair_code = store.ensure_claim_code(mac)
-        guide = render_unbound(mac, w, h, pair_code,
-                               eff_colors if is_color else 2)
+        guide = render_unbound(mac, w, h, pair_code, eff_colors)
         # X-Pair-Code 供固件打日志 / 排障用（屏幕上是图，日志里要能读到码）
         headers = {"X-Device-Unbound": "1", "X-Pair-Code": pair_code,
-                   "X-Panel-Colors": str(eff_colors if is_color else 2),
-                   "X-Colors-Source": colors_source if is_color else "mono"}
-        if is_color:
+                   "X-Panel-Colors": str(eff_colors),
+                   "X-Colors-Source": colors_source}
+        if is_raw:
             return Response(content=_pack_raw(guide, eff_colors, bpp), media_type="application/octet-stream", headers=headers)
         return Response(content=image_to_bmp_bytes(guide), media_type="image/bmp", headers=headers)
 
@@ -235,20 +241,19 @@ def render(
         unread_messages = 0
 
     try:
-        if screen == "A":
-            img = render_dual_screen(mac, "A", w, h, 2, dual_cfg, battery=battery,
-                                     unread_messages=unread_messages)
-            out_bytes = image_to_bmp_bytes(img)
-            out_media = "image/bmp"
-        else:
-            img = render_dual_screen(mac, "B", w, h, eff_colors, dual_cfg, battery=None,
-                                     unread_messages=unread_messages)
+        img = render_dual_screen(mac, screen, w, h, eff_colors, dual_cfg,
+                                 battery=battery if screen == "A" else None,
+                                 unread_messages=unread_messages)
+        if is_raw:
             out_bytes = _pack_raw(img, eff_colors, bpp)
             out_media = "application/octet-stream"
+        else:
+            out_bytes = image_to_bmp_bytes(img)
+            out_media = "image/bmp"
     except Exception as exc:  # noqa: BLE001
-        img = render_error(mac, w, h, colors if is_color else 2)
-        if is_color:
-            out_bytes = _pack_raw(img, colors, bpp)
+        img = render_error(mac, w, h, eff_colors)
+        if is_raw:
+            out_bytes = _pack_raw(img, eff_colors, bpp)
             out_media = "application/octet-stream"
         else:
             out_bytes = image_to_bmp_bytes(img)
@@ -259,8 +264,9 @@ def render(
         "X-Render-Time-Ms": str(elapsed_ms),
         "X-Mode-Id": str(persona or ""),
         "X-Refresh-Minutes": "5" if screen == "A" else "30",
-        "X-Panel-Colors": str(2 if screen == "A" else eff_colors),
-        "X-Colors-Source": "mono" if screen == "A" else colors_source,
+        # A 屏换了彩色座之后这里不再是固定 2，固件据此打日志核对实际出图色数。
+        "X-Panel-Colors": str(eff_colors),
+        "X-Colors-Source": colors_source,
     }
     if store.consume_pending_refresh(mac):
         headers["X-Pending-Refresh"] = "1"
@@ -310,7 +316,7 @@ def preview(
         override_cfg = {
             "version": 1,
             "sceneKey": sk,
-            "screen": {"size": "4.2", "colors": colors},
+            "screen": {"size": "4.2", "colors": colors, "aColors": colors},
             "config": {
                 sk: {
                     "a": {"mode": "published-app", "appId": appId, "title": name, "description": desc,
@@ -324,12 +330,12 @@ def preview(
             if screen == "B":
                 img = render_dual_screen("DEMO", "B", w, h, colors, override_cfg)
             else:
-                img = render_dual_screen("DEMO", "A", w, h, 2, override_cfg)
+                img = render_dual_screen("DEMO", "A", w, h, colors, override_cfg)
         except Exception:  # noqa: BLE001
             img = render_error("DEMO", w, h)
         return Response(content=image_to_png_bytes(img), media_type="image/png",
                         headers={"X-Preview-App": appId, "X-Cache-Hit": "0",
-                                 "X-Panel-Colors": str(colors if screen == "B" else 2)})
+                                 "X-Panel-Colors": str(colors)})
 
     # 即时预览覆盖：按所选模式直接出图（不依赖已保存的设备配置）
     if aMode or bMode or sceneKey:
@@ -343,7 +349,8 @@ def preview(
         override_cfg = {
             "version": 1,
             "sceneKey": sk,
-            "screen": {"size": "4.2", "colors": colors},
+            # A/B 各自带自己的色数，下游 resolve 才不会互相顶掉。
+            "screen": {"size": "4.2", "colors": colors, "aColors": colors},
             "config": {
                 sk: {
                     "a": {"mode": (aMode or default_a)},
@@ -383,12 +390,12 @@ def preview(
             if screen == "B":
                 img = render_dual_screen(mac_code, "B", w, h, colors, override_cfg)
             else:
-                img = render_dual_screen(mac_code, "A", w, h, 2, override_cfg)
+                img = render_dual_screen(mac_code, "A", w, h, colors, override_cfg)
         except Exception:  # noqa: BLE001
             img = render_error("DEMO", w, h)
         return Response(content=image_to_png_bytes(img), media_type="image/png",
                         headers={"X-Mode-Id": str(persona or ""), "X-Cache-Hit": "0", "X-Preview-Override": "1",
-                                 "X-Panel-Colors": str(colors if screen == "B" else 2)})
+                                 "X-Panel-Colors": str(colors)})
     if mac:
         mac = mac.strip().upper()
         dual_cfg = None
@@ -401,31 +408,26 @@ def preview(
         except Exception:  # noqa: BLE001
             unread_messages = 0
         # 未绑定也允许预览（展示空态/相册兜底），无需设备令牌
-        # 色数与设备取图同源：后台选了三色就预览三色，选了四色就预览四色。
+        # 色数与设备取图同源：A 屏读 screen.aColors、B 屏读 screen.colors，
+        # 后台各选几色就预览几色。requested 传 None，避免 query 默认的 4 把
+        # A 屏压成彩色。
         # forceColors 供后台「切色数即时看效果」用：在配置尚未下发时也能按新色数出图。
-        eff_colors, colors_source = resolve_dual_colors(dual_cfg, colors)
+        eff_colors, colors_source = resolve_dual_colors(
+            dual_cfg, None, 2 if screen == "A" else 4, screen)
         if forceColors is not None:
             eff_colors, colors_source = forceColors, "preview"
-        if screen == "B":
-            img = render_dual_screen(mac, "B", w, h, eff_colors, dual_cfg,
-                                     unread_messages=unread_messages)
-        else:
-            eff_colors, colors_source = 2, "mono"
-            img = render_dual_screen(mac, "A", w, h, 2, dual_cfg,
-                                     unread_messages=unread_messages)
+        img = render_dual_screen(mac, screen, w, h, eff_colors, dual_cfg,
+                                 unread_messages=unread_messages)
         return Response(content=image_to_png_bytes(img), media_type="image/png",
                         headers={"X-Mode-Id": str(persona or ""), "X-Cache-Hit": "0",
                                  "X-Panel-Colors": str(eff_colors),
                                  "X-Colors-Source": colors_source})
     # 无 mac：渲染一张演示图（默认学习场景）
     demo_cfg = _demo_config()
-    if screen == "B":
-        img = render_dual_screen("DEMO", "B", w, h, colors, demo_cfg)
-    else:
-        img = render_dual_screen("DEMO", "A", w, h, 2, demo_cfg)
+    img = render_dual_screen("DEMO", screen, w, h, colors, demo_cfg)
     return Response(content=image_to_png_bytes(img), media_type="image/png",
                     headers={"X-Mode-Id": str(persona or ""), "X-Cache-Hit": "0",
-                             "X-Panel-Colors": str(colors if screen == "B" else 2)})
+                             "X-Panel-Colors": str(colors)})
 
 
 def _demo_config() -> dict:
@@ -433,7 +435,7 @@ def _demo_config() -> dict:
     return {
         "version": 1,
         "sceneKey": "system",
-        "screen": {"size": "4.2", "colors": 4},
+        "screen": {"size": "4.2", "colors": 4, "aColors": 3},
         "config": {
             # 演示默认落在系统场景：与「设备开箱、还没配内容」看到的一致。
             "system": {

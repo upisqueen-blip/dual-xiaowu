@@ -18,7 +18,12 @@ public:
     static constexpr int kHeight = FPC2_HEIGHT;
     static constexpr size_t kFrameBytes = kWidth * kHeight / 4;
 
-    explicit Ssd2683zaColorPanel(std::function<bool()> other_panel_busy);
+    // 引脚可传入：默认驱动 FPC2 座；两块座插同型号四色屏时，
+    // 传 EPD_CS_PIN / EPD_BUSY_PIN 即可驱动 A 座（共用 SPI/DC/RST）。
+    explicit Ssd2683zaColorPanel(
+        std::function<bool()> other_panel_busy,
+        gpio_num_t cs_pin = EPD_COLOR_CS_PIN,
+        gpio_num_t busy_pin = EPD_COLOR_BUSY_PIN);
     ~Ssd2683zaColorPanel();
 
     bool Init();
@@ -36,6 +41,8 @@ private:
     SemaphoreHandle_t mutex_ = nullptr;
     uint8_t* dma_buffer_ = nullptr;
     std::function<bool()> other_panel_busy_;
+    gpio_num_t cs_pin_ = EPD_COLOR_CS_PIN;
+    gpio_num_t busy_pin_ = EPD_COLOR_BUSY_PIN;
     bool available_ = false;
     bool panel_awake_ = false;
     // BUSY 有效电平（运行时自适应）。有的模组是「忙=低、空闲=高」，有的相反；

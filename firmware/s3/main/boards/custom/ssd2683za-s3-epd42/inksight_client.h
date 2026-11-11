@@ -54,6 +54,9 @@ public:
     //   bw_plane:  1=白 0=黑（MSB 左，行优先）
     //   red_plane: 1=红 0=非红
     // 黄色(2)按 EPD_YELLOW_AS_RED 宏决定映射为红色(1)或白色(0)，默认红色。
+    // panel_colors / panel_screen：请求哪块屏、按几色打包。
+    //   默认 0 + "B" 保持历史行为（FPC2 按 FPC2_COLOR_COUNT 出图）。
+    //   A 座换三色/四色屏后传 ("A", 3/4)，后端按后台给该屏选的色数渲染。
     static bool Load2bpp(NetworkInterface* network,
                          const std::string& server,
                          const std::string& persona,
@@ -62,7 +65,9 @@ public:
                          uint8_t* red_plane,
                          std::string& error,
                          int* server_refresh_minutes = nullptr,
-                         bool* device_unbound_out = nullptr);
+                         bool* device_unbound_out = nullptr,
+                         int panel_colors = 0,
+                         const char* panel_screen = "B");
 
     // 拉取双屏控制台配置（GET /api/device/<mac>/dual-config，原始 JSON 存入
     // json_out）。无配置时后端返回 {"config":null}（HTTP 200，仍算成功）。

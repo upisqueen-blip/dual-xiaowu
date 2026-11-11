@@ -20,8 +20,11 @@ constexpr uint32_t kBusyTimeoutMs = 45000;
 std::atomic<bool> Ssd2683zaColorPanel::refreshing_{false};
 
 Ssd2683zaColorPanel::Ssd2683zaColorPanel(
-    std::function<bool()> other_panel_busy)
-    : other_panel_busy_(std::move(other_panel_busy)) {
+    std::function<bool()> other_panel_busy, gpio_num_t cs_pin,
+    gpio_num_t busy_pin)
+    : other_panel_busy_(std::move(other_panel_busy)),
+      cs_pin_(cs_pin),
+      busy_pin_(busy_pin) {
     mutex_ = xSemaphoreCreateMutex();
     dma_buffer_ = static_cast<uint8_t*>(heap_caps_malloc(
         kDmaChunkBytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
@@ -31,13 +34,13 @@ Ssd2683zaColorPanel::Ssd2683zaColorPanel(
     }
 
     gpio_config_t outputs = {};
-    outputs.pin_bit_mask = 1ULL << EPD_COLOR_CS_PIN;
+    outputs.pin_bit_mask = 1ULL << cs_pin_;
     outputs.mode = GPIO_MODE_OUTPUT;
     ESP_ERROR_CHECK(gpio_config(&outputs));
-    gpio_set_level(EPD_COLOR_CS_PIN, 1);
+    gpio_set_level(cs_pin_, 1);
 
     gpio_config_t busy = {};
-    busy.pin_bit_mask = 1ULL << EPD_COLOR_BUSY_PIN;
+    busy.pin_bit_mask = 1ULL << busy_pin_;
     busy.mode = GPIO_MODE_INPUT;
     busy.pull_up_en = GPIO_PULLUP_ENABLE;
     ESP_ERROR_CHECK(gpio_config(&busy));
@@ -85,11 +88,11 @@ void Ssd2683zaColorPanel::HardwareReset() {
 
 bool Ssd2683zaColorPanel::WaitBusy(uint32_t timeout_ms) {
     const TickType_t start = xTaskGetTickCount();
-    while (gpio_get_level(EPD_COLOR_BUSY_PIN) == busy_active_level_) {
+    while (gpio_get_level(busy_pin_) == busy_active_level_) {
         if ((xTaskGetTickCount() - start) * portTICK_PERIOD_MS >= timeout_ms) {
             ESP_LOGE(kTag, "BUSY timeout after %lu ms (GPIO%d=%d)",
-                     static_cast<unsigned long>(timeout_ms), EPD_COLOR_BUSY_PIN,
-                     gpio_get_level(EPD_COLOR_BUSY_PIN));
+                     static_cast<unsigned long>(timeout_ms), busy_pin_,
+                     gpio_get_level(busy_pin_));
             return false;
         }
         // pdMS_TO_TICKS(2) can round down to zero on configurations with a
@@ -135,32 +138,32 @@ void Ssd2683zaColorPanel::SendDataRaw(const uint8_t* data, size_t length) {
 }
 
 void Ssd2683zaColorPanel::SendCommandOnly(uint8_t command) {
-    gpio_set_level(EPD_COLOR_CS_PIN, 0);
+    gpio_set_level(cs_pin_, 0);
     SendCommandRaw(command);
-    gpio_set_level(EPD_COLOR_CS_PIN, 1);
+    gpio_set_level(cs_pin_, 1);
 }
 
 void Ssd2683zaColorPanel::SendCommandWithByte(uint8_t command, uint8_t value) {
-    gpio_set_level(EPD_COLOR_CS_PIN, 0);
+    gpio_set_level(cs_pin_, 0);
     SendCommandRaw(command);
     SendDataRaw(&value, 1);
-    gpio_set_level(EPD_COLOR_CS_PIN, 1);
+    gpio_set_level(cs_pin_, 1);
 }
 
 void Ssd2683zaColorPanel::SendCommandWithBuffer(uint8_t command,
                                                 const uint8_t* data,
                                                 size_t length) {
-    gpio_set_level(EPD_COLOR_CS_PIN, 0);
+    gpio_set_level(cs_pin_, 0);
     SendCommandRaw(command);
     SendDataRaw(data, length);
-    gpio_set_level(EPD_COLOR_CS_PIN, 1);
+    gpio_set_level(cs_pin_, 1);
 }
 
 void Ssd2683zaColorPanel::SendDataStream(const uint8_t* data, size_t length) {
     gpio_set_level(EPD_DC_PIN, 1);
-    gpio_set_level(EPD_COLOR_CS_PIN, 0);
+    gpio_set_level(cs_pin_, 0);
     SendDataRaw(data, length);
-    gpio_set_level(EPD_COLOR_CS_PIN, 1);
+    gpio_set_level(cs_pin_, 1);
 }
 
 bool Ssd2683zaColorPanel::InitializePanel() {
@@ -172,15 +175,15 @@ bool Ssd2683zaColorPanel::InitializePanel() {
     // 选反后 WaitBusy 进去就死等超时，整块屏被判为不存在。复位后短延 + 连读去抖
     // 取稳定值，彻底消除该误判。
     vTaskDelay(pdMS_TO_TICKS(30));
-    int idle_level = gpio_get_level(EPD_COLOR_BUSY_PIN);
+    int idle_level = gpio_get_level(busy_pin_);
     for (int i = 0; i < 3; ++i) {
         vTaskDelay(pdMS_TO_TICKS(8));
-        const int now = gpio_get_level(EPD_COLOR_BUSY_PIN);
+        const int now = gpio_get_level(busy_pin_);
         if (now != idle_level) idle_level = now;  // 以最近稳定值为准
     }
     busy_active_level_ = idle_level == 0 ? 1 : 0;
     ESP_LOGI(kTag, "FPC2 post-reset BUSY(GPIO%d)=%d → BUSY 有效电平=%d%s",
-             EPD_COLOR_BUSY_PIN, idle_level, busy_active_level_,
+             busy_pin_, idle_level, busy_active_level_,
              busy_active_level_ == kBusyActiveLevel ? "" : " (与参考驱动相反，已自适应)");
     if (!WaitBusy(5000)) return false;
 
@@ -215,7 +218,7 @@ bool Ssd2683zaColorPanel::InitializePanel() {
     SendCommandWithByte(0xE9, 0x01);
     ESP_LOGI(kTag, "SSD2683ZA initialized: %dx%d BWRY, BUSY active=%d, FPC2 CS=GPIO%d BUSY=GPIO%d",
              FPC2_WIDTH, FPC2_HEIGHT, busy_active_level_,
-             EPD_COLOR_CS_PIN, EPD_COLOR_BUSY_PIN);
+             cs_pin_, busy_pin_);
     return true;
 }
 
@@ -232,7 +235,7 @@ bool Ssd2683zaColorPanel::Init() {
     if (ok) {
         SendCommandOnly(0x04);  // Power on.
         vTaskDelay(pdMS_TO_TICKS(100));
-        ok = gpio_get_level(EPD_COLOR_BUSY_PIN) == busy_active_level_;
+        ok = gpio_get_level(busy_pin_) == busy_active_level_;
         if (ok) {
             // 四色（BWRY）模组的 PON 要先把内部 DC/DC 拉起来，实测远远超过
             // 原定的 10 秒；旧值会让一块完全正常的彩屏在开机阶段被判「不存在」，
@@ -257,8 +260,8 @@ bool Ssd2683zaColorPanel::Init() {
         else {
             ESP_LOGW(kTag,
                      "FPC2 panel did not assert BUSY after PON (GPIO%d=%d)",
-                     EPD_COLOR_BUSY_PIN,
-                     gpio_get_level(EPD_COLOR_BUSY_PIN));
+                     busy_pin_,
+                     gpio_get_level(busy_pin_));
         }
         if (ok) {
             panel_awake_ = true;
@@ -267,8 +270,8 @@ bool Ssd2683zaColorPanel::Init() {
     }
     available_ = ok;
     ESP_LOGI(kTag, "FPC2 probe %s (CS=%d BUSY=%d level=%d)",
-             available_ ? "passed" : "failed", EPD_COLOR_CS_PIN,
-             EPD_COLOR_BUSY_PIN, gpio_get_level(EPD_COLOR_BUSY_PIN));
+             available_ ? "passed" : "failed", cs_pin_,
+             busy_pin_, gpio_get_level(busy_pin_));
     xSemaphoreGive(mutex_);
     return available_;
 }
@@ -295,12 +298,12 @@ bool Ssd2683zaColorPanel::ShowFrame(const uint8_t* packed_frame) {
             // line to return to idle; a floating/unconnected FPC2 otherwise
             // looks like an instant successful refresh.
             vTaskDelay(pdMS_TO_TICKS(100));
-            ok = gpio_get_level(EPD_COLOR_BUSY_PIN) == busy_active_level_;
+            ok = gpio_get_level(busy_pin_) == busy_active_level_;
             if (!ok) {
                 ESP_LOGE(kTag,
                          "SSD2683ZA did not assert BUSY after PON (GPIO%d=%d); check FPC2 seating/power",
-                         EPD_COLOR_BUSY_PIN,
-                         gpio_get_level(EPD_COLOR_BUSY_PIN));
+                         busy_pin_,
+                         gpio_get_level(busy_pin_));
             } else {
                 ok = WaitBusy(10000);
             }
