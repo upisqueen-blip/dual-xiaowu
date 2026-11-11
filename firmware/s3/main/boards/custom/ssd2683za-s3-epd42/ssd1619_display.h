@@ -11,6 +11,8 @@
 #include "epaper_dashboard.h"
 #include "lcd_display.h"
 
+class Uc1679Display;
+
 class Ssd1619Display : public LcdDisplay {
 public:
     Ssd1619Display();
@@ -37,6 +39,8 @@ public:
     // 上黑下白」三张图，每张 10 秒并打印 BUSY 采样轨迹。仅由
     // config.h 的 EPD_A42_PROBE_TEST 在启动时调用一次。
     void RunPanelProbe();
+    // 纯色循环自检（全黑/全白各两次），由 EPD_A42_COLOR_TEST 控制。
+    void RunColorCycleTest();
 
     // 直接用 caller 提供的帧缓冲刷新画面。
     // frame: 50*300=15000 字节，1-bit/行/MSB 左白 1/黑 0。
@@ -46,6 +50,16 @@ public:
     // 按键导航或语音会话会调 ReleaseExternalFrameHold() 交还控制权。
     void RawFrameRefresh(const uint8_t* frame, bool partial);
     void ReleaseExternalFrameHold();
+
+    // 把「上屏」这件事交给三色驱动（A 座改插三色屏时用）。
+    //
+    // 本类仍保留全部 LVGL/仪表盘/对话文本能力，继续作为 Display 接口与 1bpp
+    // 帧缓冲的持有者；只是真正的波形下发不再走 SSD1619 命令，而是把这帧当作
+    // 三色屏的 B/W 平面交给 backend->ShowFrame()，红平面恒为 0。
+    //
+    // 一旦设置，Refresh() 会在发出任何 SSD1619 命令之前转入三色路径——那个座
+    // 上的控制器已经换成 SSD1683 一类，SSD1619 的初始化/波形命令会把它配乱。
+    void SetBwrBackend(Uc1679Display* backend) { bwr_backend_ = backend; }
 
     bool IsPanelBusy() const {
         if (busy_idle_level_ < 0 || panel_faulted_) return false;
@@ -70,6 +84,10 @@ private:
     // 本屏完成初始化时共享 RST 的序号。刷新前若序号变了，说明 FPC2 拉过这根
     // 共用 RST，本屏的升压/LUT 已被清空，必须重新初始化才能出墨。
     unsigned rst_epoch_seen_ = 0;
+    // 全刷时 0x26（旧画面平面）写反相还是同相。
+    // true  反相：差分波形下面板判「整屏都变了」，能持续出图；
+    // false 同相：绝对波形下面板才需要这样写，差分面板会「整屏无变化」而不动。
+    bool invert_old_plane_ = true;
     bool panel_faulted_ = false;
     // 故障锁存的时刻，用于 kPanelFaultRetryMs 后自动复位重试（见 Refresh）。
     int64_t panel_faulted_at_ms_ = 0;
@@ -95,6 +113,15 @@ private:
     // 外部帧（InkSight / 双屏 A 便签）已上屏，仪表盘不得抢占，直到按键或会话。
     bool hold_external_frame_ = false;
     EpaperDashboard dashboard_;
+
+    // ---- 三色后端（A 座改插三色屏时启用）----
+    // backend 为空 → 走原生 SSD1619 路径（原设计）。
+    // backend 非空 → 全部上屏动作转交它，本类只做帧缓冲与去重。
+    Uc1679Display* bwr_backend_ = nullptr;
+    uint8_t* bwr_red_plane_ = nullptr;   // 恒 0 = 不显示红
+    uint8_t* bwr_last_frame_ = nullptr;  // 上一帧副本，用于内容去重
+    bool bwr_frame_valid_ = false;
+    void RefreshViaBwr(const uint8_t* data);
 
     static void FlushCallback(lv_display_t* display, const lv_area_t* area,
                               uint8_t* pixels);

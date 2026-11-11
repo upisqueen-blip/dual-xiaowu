@@ -80,13 +80,18 @@
 #define EPD_RST_PIN   GPIO_NUM_11
 
 // ---- FPC1：黑白快刷屏 SSD1619（GetDisplay() 主屏，对话 + 学习信息）----
-#define EPD_CS_PIN    GPIO_NUM_39
-#define EPD_BUSY_PIN  GPIO_NUM_40
+// 【临时交叉验证配置】现场已把 A/B 两块屏的排线对调，因此这里把两组引脚
+// 也对调，让 SSD1619 驱动去驱动「现在插在 FPC2 座上」的黑白屏：
+//   A 屏（SSD1619）→ FPC2 座 → CS1/BUSY1 = GPIO9 / GPIO12
+//   B 屏（三色）  → FPC1 座 → CS2/BUSY2 = GPIO39 / GPIO40
+// 验证完成后必须改回：A=FPC1=GPIO39/40，B=FPC2=GPIO9/12（见文件末尾说明）。
+#define EPD_CS_PIN    GPIO_NUM_9
+#define EPD_BUSY_PIN  GPIO_NUM_12
 
 // ---- FPC2：彩色图像屏（menuconfig 选 3-color SSD1683 BWR 或 4-color SSD2683ZA
 //      BWRY；相册 / InkSight，驱动随 FPC2_PANEL_COLORS 切换）----
-#define EPD_COLOR_CS_PIN   GPIO_NUM_9
-#define EPD_COLOR_BUSY_PIN GPIO_NUM_12
+#define EPD_COLOR_CS_PIN   GPIO_NUM_39
+#define EPD_COLOR_BUSY_PIN GPIO_NUM_40
 
 // Connector aliases used by the SSD1619 probe/recovery logic.
 #define EPD_CS_PIN_FPC1    EPD_CS_PIN
@@ -115,9 +120,35 @@
 #define EPD_A42_PROBE_TEST 0
 #endif
 
+// 纯色循环自检：全黑 / 全白各两次，每张停留 6 秒，走完整全刷波形 0xF7。
+// 唯一目的是让肉眼回答「玻璃还会不会翻转」，用于区分软件与硬件。
+// 正常情况下必须为 0；出厂固件绝不能打开。
+#ifndef EPD_A42_COLOR_TEST
+#define EPD_A42_COLOR_TEST 0
+#endif
+
+// 双三色屏硬件自检：两块座子插同型号三色屏时，用同一份驱动分别刷 A 座与 B 座。
+// 判据只有一条——同一张图下发后，哪块玻璃变了、哪块没变。
+// 打开后设备停在自检循环里，不进正常业务流程；诊断完必须改回 0。
+#ifndef EPD_DUAL_BWR_TEST
+#define EPD_DUAL_BWR_TEST 0
+#endif
+
+// A 座（FPC2，CS=GPIO9 / BUSY=GPIO12）当前插的是三色屏，不是 SSD1619 黑白屏。
+// 1 = A 屏的上屏动作全部转交三色驱动（Uc1679Display），SSD1619 的初始化与
+//     波形命令一条都不发——那个座上的控制器已经不认这套命令集。
+// 0 = 原设计，A 座走 SSD1619 黑白快刷。
+// 换回黑白屏时改回 0 即可，驱动代码两侧都保留。
+#ifndef EPD_A_SCREEN_IS_BWR
+#define EPD_A_SCREEN_IS_BWR 1
+#endif
+
 // 双屏配置开关：1 = FPC1 快刷屏 + FPC2 SSD2683ZA 四色屏同时驱动；
 // 0 = 仅快刷屏（旧行为，三色屏代码不初始化）。
 #ifndef EPD_ENABLE_COLOR_SCREEN
+// 注意：这个开关并不是"只关彩屏驱动"——置 0 会连带把板级里 dual_mode_ /
+// power_mode_ 等一整批声明一起 #if 掉，直接编译不过。要保持彩屏不刷新，
+// 应在板级初始化处拦截，而不是关这个宏。
 #define EPD_ENABLE_COLOR_SCREEN 1
 #endif
 

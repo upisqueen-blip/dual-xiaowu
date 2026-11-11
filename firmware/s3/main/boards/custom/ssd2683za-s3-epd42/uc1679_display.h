@@ -54,8 +54,13 @@ public:
     static constexpr size_t kStride = (kWidth + 7) / 8;        // 50
     static constexpr size_t kPlaneBytes = kStride * kHeight;   // 15000
 
+    // 引脚可传入：默认驱动 FPC2 座（EPD_COLOR_CS_PIN / EPD_COLOR_BUSY_PIN）。
+    // 两块座子插同型号三色屏时，传 EPD_CS_PIN / EPD_BUSY_PIN 即可用同一份驱动
+    // 刷另一个座，从而把「座子问题」和「屏问题」彻底分开。
     explicit Uc1679Display(
-        std::function<bool()> other_panel_busy = nullptr);
+        std::function<bool()> other_panel_busy = nullptr,
+        gpio_num_t cs_pin = EPD_COLOR_CS_PIN,
+        gpio_num_t busy_pin = EPD_COLOR_BUSY_PIN);
     ~Uc1679Display();
 
     // 探测面板是否在座（初始化 + 自动探测命令集是否成功）。
@@ -68,6 +73,14 @@ public:
 
     // 进入深睡（保留 RAM，显示保持）。
     void Sleep();
+
+    // 诊断用：跳过「探测是否成功」的判定，直接允许下发刷新。
+    // 本板三色屏 PON 后 BUSY 不一定翻转，探测会把好屏判成"未连接"，从而
+    // 连刷新命令都不发。硬件自检必须绕开这个判定，只看玻璃有没有变化。
+    void ForceAvailable() {
+        available_ = true;
+        if (variant_ < 0) variant_ = FPC2_DRIVER_MODE;
+    }
 
     static bool IsRefreshing() { return g_uc1679_refreshing.load(); }
 
@@ -104,6 +117,8 @@ private:
     uint8_t* dma_buffer_ = nullptr;
     SemaphoreHandle_t mutex_ = nullptr;
     std::function<bool()> other_panel_busy_;
+    gpio_num_t cs_pin_ = EPD_COLOR_CS_PIN;
+    gpio_num_t busy_pin_ = EPD_COLOR_BUSY_PIN;
     bool available_ = false;
     bool panel_awake_ = false;
     int busy_idle_level_ = -1;   // 复位后 BUSY 静态电平
